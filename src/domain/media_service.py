@@ -9,14 +9,15 @@ from fastapi import HTTPException, status
 from src.integrations import media_repository
 from src.integrations import storage_adapter
 from src.schemas.media import PresignedUrlRequest, MediaMetadataRequest
-from src.domain.authorization import verify_active_participant
+from src.domain.authorization import verify_active_participant, assert_memoir_editable
 import logging
 
 logger = logging.getLogger(__name__)
 
 from src.core.config import (
-    STORAGE_TIER_HOT, 
-    TRANSCRIPTION_STATUS_PENDING
+    STORAGE_TIER_HOT,
+    TRANSCRIPTION_STATUS_PENDING,
+    TRANSCRIPTION_STATUS_SKIPPED,
 )
 
 
@@ -47,10 +48,11 @@ class MediaService:
         memoir_id = payload.memoir_id
         
         verify_active_participant(
-            memoir_id, 
-            user_id, 
+            memoir_id,
+            user_id,
             required_roles=["owner", "admin", "contributor"]
         )
+        assert_memoir_editable(memoir_id)
 
         # Enforce file size and type validation via the storage adapter
         media_type, extension = storage_adapter.validate_upload(payload.mime_type)
@@ -89,13 +91,14 @@ class MediaService:
         memoir_id = payload.memoir_id
 
         participant = verify_active_participant(
-            memoir_id, 
-            user_id, 
+            memoir_id,
+            user_id,
             required_roles=["owner", "admin", "contributor"]
         )
+        assert_memoir_editable(memoir_id)
         participant_id = participant["id"]
 
-        # SECURITY FIX: Enforce tenant isolation — ensure the storage key explicitly belongs 
+        # SECURITY FIX: Enforce tenant isolation — ensure the storage key explicitly belongs
         # to this memoir ID to prevent cross-tenant asset hijacking.
         expected_prefix = f"memoirs/{memoir_id}/"
         if not payload.storage_key.startswith(expected_prefix):
@@ -104,13 +107,21 @@ class MediaService:
                 detail="Invalid storage key path for this memoir container."
             )
 
+        # FR02 DoD #10: never silently lose what someone recorded. If the object
+        # isn't actually in storage yet, this is NOT a completed upload — refuse
+        # to save metadata for it rather than saving a row that points at nothing.
         try:
-            file_size = storage_adapter.object_exists(payload.storage_key)
-            if not file_size:
-                logger.warning(f"Storage index lag detected for key: {payload.storage_key}. Proceeding with metadata save.")
+            storage_byte_size = storage_adapter.object_exists(payload.storage_key)
         except Exception as exc:
-            logger.warning(f"Could not verify file existence due to error: {exc}")
-            
+            logger.warning(f"Could not verify file existence for key {payload.storage_key}: {exc}")
+            storage_byte_size = None
+
+        if not storage_byte_size:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="We couldn't confirm this upload finished. Please wait a moment and try again."
+            )
+
         # 2. KIND-SPECIFIC VALIDATION: Ensure audio and video assets provide a valid duration
         if payload.kind in ["audio", "video"] and (payload.duration_ms is None):
             raise HTTPException(
@@ -147,13 +158,16 @@ class MediaService:
         # 2. Dynamically inject server-side tracking fields securely
         media_data["uploaded_by_participant_id"] = participant_id
         media_data["storage_tier"] = STORAGE_TIER_HOT
-        
-            # STORAGE_TIER_HOT if payload.kind == "photo" else TRANSCRIPTION_STATUS_PENDING
+
+        # FR02 DoD #10: trust storage's reported size, not what the browser claimed —
+        # a mismatch means a truncated upload (a recording that plays and cuts off).
+        media_data["byte_size"] = storage_byte_size
+
         if payload.kind == "photo":
-            media_data["transcription_status"] = "skipped"
+            media_data["transcription_status"] = TRANSCRIPTION_STATUS_SKIPPED
         else:
-            media_data["transcription_status"] = TRANSCRIPTION_STATUS_PENDING # "pending"
-        
+            media_data["transcription_status"] = TRANSCRIPTION_STATUS_PENDING
+
 
         try:
             db_response = media_repository.insert_media_metadata(media_data)

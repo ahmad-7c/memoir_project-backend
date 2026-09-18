@@ -1,13 +1,16 @@
-from typing import Dict, Any
 from datetime import datetime, timezone
-from fastapi import APIRouter, Depends, HTTPException
+from typing import Dict, Any, Optional
+from fastapi import APIRouter, Depends, Header, HTTPException, status
 
 from src.core.config import settings
 from src.core.auth import get_current_user
+from src.domain.access_control import resolve_memoir_access
 from src.domain.share_service import ShareService
 from src.integrations.share_repository import ShareRepository
 from src.schemas.share import (
-    ShareLinkResponse, ShareLinkResponseEnvelope, ShareLinkUpdateRequest, SharedMemoirResponseEnvelope
+    ShareLinkResponse, ShareLinkResponseEnvelope, ShareLinkUpdateRequest,
+    SharedMemoirResponse, SharedMemoirResponseEnvelope,
+    UnlockRequest, UnlockResponse, UnlockResponseEnvelope,
 )
 
 owner_router = APIRouter(prefix="/api/memoirs", tags=["Share Links"])
@@ -20,6 +23,8 @@ def _to_link_response(link: Dict[str, Any]) -> ShareLinkResponse:
         scope=link["scope"],
         token=link["token"],
         url=f"{settings.share_link_base_url.rstrip('/')}/{link['token']}",
+        visibility=link.get("visibility") or "password",
+        has_password=bool(link.get("password_hash")),
         created_by_participant_id=str(link["created_by_participant_id"]) if link.get("created_by_participant_id") else None,
         created_at=link["created_at"],
         expires_at=link.get("expires_at"),
@@ -46,32 +51,57 @@ async def delete_share_link(memoir_id: str, current_user: dict = Depends(get_cur
     await ShareService.revoke_share_link(memoir_id, user_id)
     return {"success": True, "message": "Share link revoked."}
 
-# --- READER ROUTE (Replaces the need for a separate deps_share.py) ---
+# --- READER ROUTES ---
+
+@reader_router.post("/{token}/unlock", response_model=UnlockResponseEnvelope)
+async def unlock_shared_memoir(token: str, payload: UnlockRequest):
+    """
+    A reader identifies themselves with a name + the password the owner shared
+    personally, and gets back a short-lived signed reader token to use for every
+    subsequent request (reading the memoir, reading/posting comments).
+    """
+    result = await ShareService.unlock_share_link(token, payload.display_name, payload.password)
+    return {"success": True, "message": "Unlocked.", "data": UnlockResponse(**result)}
+
 @reader_router.get("/{token}", response_model=SharedMemoirResponseEnvelope)
-async def read_shared_memoir(token: str):
+async def read_shared_memoir(token: str, authorization: Optional[str] = Header(None)):
     link = await ShareRepository.get_link_by_token(token)
-    
-    # Check if link exists, is revoked, or is expired
-    if not link or link.get("revoked_at"):
+
+    if not link or link.get("revoked_at") or link.get("visibility") == "private":
         raise HTTPException(status_code=404, detail="Not found.")
-    
+
     if link.get("expires_at"):
         expires_at = datetime.fromisoformat(link["expires_at"].replace("Z", "+00:00"))
         if datetime.now(timezone.utc) > expires_at:
             raise HTTPException(status_code=404, detail="Link expired.")
 
-    memoir = await ShareRepository.get_memoir_by_id(link["memoir_id"])
-    if not memoir or memoir.get("status") != "published":
+    memoir = await ShareService.get_published_memoir(link["memoir_id"])
+    if not memoir:
         raise HTTPException(status_code=404, detail="Not found.")
 
-    # Increment the open count in the background
+    # Accept EITHER a reader token issued by /unlock for this exact link, OR an
+    # owner JWT for an active participant of this memoir (e.g. previewing their own
+    # share page). Missing/invalid credentials -> 401, so the frontend can tell
+    # "please unlock again" apart from "this link is dead" (404, handled above).
+    resolve_memoir_access(
+        memoir_id=str(link["memoir_id"]),
+        authorization=authorization,
+        expected_share_link_id=str(link["id"]),
+        unauthenticated_status=status.HTTP_401_UNAUTHORIZED,
+    )
+
     await ShareRepository.increment_open_count(link["id"], link.get("open_count", 0))
 
     memories = await ShareRepository.get_shared_memoir_view(link["memoir_id"])
-    
-    data = {
-        **memoir,
-        "can_comment": memoir.get("comment_policy") == "public",
-        "memories": memories
-    }
+
+    data = SharedMemoirResponse(
+        id=str(memoir["id"]),
+        subject_name=memoir.get("subject_name"),
+        subject_born_on=memoir.get("subject_born_on"),
+        subject_died_on=memoir.get("subject_died_on"),
+        subject_is_living=bool(memoir.get("subject_is_living")),
+        description=memoir.get("description"),
+        can_comment=memoir.get("comment_policy") == "public",
+        memories=memories,
+    )
     return {"success": True, "message": "Operation successful", "data": data}

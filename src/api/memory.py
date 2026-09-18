@@ -3,7 +3,7 @@
 @description FastAPI router for owner memory capture, feed retrieval, and pre-publication management.
 """
 
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, BackgroundTasks, Depends, status
 from src.schemas.memory import MemoryCreateRequest
 from src.domain.memory_service import MemoryService
 from src.core.auth import get_current_user  # Production JWT verification dependency
@@ -12,17 +12,20 @@ router = APIRouter(prefix="/api/memories", tags=["Memories"])
 
 @router.post("", status_code=status.HTTP_201_CREATED)
 def create_memory(
-    payload: MemoryCreateRequest, 
+    payload: MemoryCreateRequest,
+    background_tasks: BackgroundTasks,
     current_user: dict = Depends(get_current_user)
 ):
     """
-    Create a new memory entry. Supports combining text, voice recordings, 
-    and photographs into a single memory using media asset IDs.
+    Create a new memory entry. Supports combining text, voice recordings,
+    and photographs into a single memory using media asset IDs. Transcription
+    for any attached audio is queued in the background and does not block this
+    response.
     """
     user_id = current_user.get("user_id") or current_user.get("id") or current_user.get("sub")
 
     user_session = {"user_id": user_id}
-    result = MemoryService.create_memory(payload, user_session)
+    result = MemoryService.create_memory(payload, user_session, background_tasks=background_tasks)
     return {
         "success": True,
         "message": "Memory successfully created.",

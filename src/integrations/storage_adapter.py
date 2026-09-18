@@ -138,20 +138,24 @@ def object_exists(key: str) -> int | None:
     return None
 
 
-def create_playback_url(key: str) -> str | None:
+def create_playback_url(key: str, ttl_seconds: int | None = None) -> str | None:
     """
     Generates a fresh, expiring temporary signed URL for media streaming/playback.
     Note: These URLs are dynamically generated per response and never stored in the database.
 
     Args:
         key (str): The storage path key of the media asset.
+        ttl_seconds (int | None): Override for the signed URL lifetime. Defaults
+            to settings.media_signed_url_ttl — callers with a longer-running use
+            (e.g. PDF export, which must still be able to fetch the image by the
+            time rendering happens) can pass a longer TTL explicitly.
 
     Returns:
         str | None: The temporary playback URL string, or None if generation fails.
     """
     try:
         res = _client.storage.from_(settings.supabase_media_bucket).create_signed_url(
-            key, settings.media_signed_url_ttl
+            key, ttl_seconds if ttl_seconds is not None else settings.media_signed_url_ttl
         )
         return res.get("signedURL") or res.get("signed_url")
     except Exception as exc:

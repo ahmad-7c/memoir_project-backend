@@ -4,7 +4,7 @@
 """
 
 from fastapi import HTTPException, status
-from src.integrations import memoir_repository , memory_repository  
+from src.integrations import memoir_repository, participant_repository
 
 
 def verify_active_participant(memoir_id: str, user_id: str, required_roles: list[str] = None) -> dict:
@@ -29,7 +29,7 @@ def verify_active_participant(memoir_id: str, user_id: str, required_roles: list
     # Ensure it's explicitly a clean string
     user_id_str = str(user_id)
     
-    res = memory_repository.fetch_participant(str(memoir_id), user_id_str)
+    res = participant_repository.fetch_participant(str(memoir_id), user_id_str)
     if not res.data:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -59,3 +59,24 @@ def verify_active_participant(memoir_id: str, user_id: str, required_roles: list
             )
 
     return participant
+
+
+def assert_memoir_editable(memoir_id: str) -> None:
+    """
+    A published memoir is immutable (Feature Request 04). Comments are the only
+    thing that may still be added after publication — every other write path to
+    memoir content (memories, media, transcripts) must call this first.
+
+    This is layer 1 of two: a database trigger (see migrations/) is the backstop
+    for writes that don't go through this function.
+
+    Raises:
+        HTTPException (409): If the memoir's status is 'published'.
+    """
+    res = memoir_repository.fetch_memoir_status(str(memoir_id))
+    memoir = res.data[0] if res.data else None
+    if memoir and memoir.get("status") == "published":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This memoir has been published and can no longer be changed."
+        )

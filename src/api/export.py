@@ -38,9 +38,12 @@ def request_memoir_export(
 @router.get("/{memoir_id}/export/latest")
 def get_latest_export_status(
     memoir_id: str,
-    current_user_id: str = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user)
 ):
-    """Fetches the latest export job status and signed download URL if ready."""
+    """Fetches the latest export job status and signed download URL if ready. Owner-only."""
+    user_id = current_user.get("user_id") or current_user.get("id") or current_user.get("sub")
+    ExportService.verify_owner_access(memoir_id, user_id)
+
     job = ExportRepository.get_latest_export(memoir_id)
     if not job:
         return {"status": "none"}

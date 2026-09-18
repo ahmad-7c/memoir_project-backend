@@ -3,13 +3,37 @@
 @description Business logic for compiling memoir exports, PDF generation, and storage management using pure Python (xhtml2pdf).
 """
 
+import html
 import io
+from urllib.parse import urlsplit
+
 from fastapi import HTTPException, status
 from xhtml2pdf import pisa
+from xhtml2pdf.config.resources import ResourceAccessPolicy
+
+from src.core.config import settings
 from src.domain.authorization import verify_active_participant
+from src.integrations import participant_repository, storage_adapter
 from src.integrations.export_repository import ExportRepository
 
+# Long enough to survive PDF generation (download + AssemblyAI-scale documents
+# can take a while) without living so long it's a lingering credential.
+EXPORT_IMAGE_SIGNED_URL_TTL_SECONDS = 15 * 60
+
 class ExportService:
+
+    @classmethod
+    def verify_owner_access(cls, memoir_id: str, user_id: str) -> None:
+        """
+        Export is owner-only — never readers, never share-token holders, per PRD.
+        Mirrors the role check used to queue an export (initiate_export) so status
+        lookups and job creation stay consistent. Returns 404 (not 403) so a
+        stranger can't distinguish "not yours" from "doesn't exist".
+        """
+        participant_res = participant_repository.fetch_participant(memoir_id, user_id)
+        participants = participant_res.data or []
+        if not participants or participants[0].get("role") not in ("owner", "admin", "contributor"):
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Memoir not found.")
 
     @classmethod
     def initiate_export(cls, memoir_id: str, user_id: str) -> dict:
@@ -44,10 +68,26 @@ class ExportService:
             # 2. Build professional print HTML template (Book layout)
             html_content = cls._render_memoir_html(memoir, memories, media_assets, transcripts)
 
-            # 3. Compile HTML to PDF bytes using xhtml2pdf
+            # 3. Compile HTML to PDF bytes using xhtml2pdf. xhtml2pdf fetches
+            # <img>/<link>/@font-face targets over the network while rendering —
+            # without a restrictive policy, a memory whose (properly escaped, so
+            # this only matters for the ALREADY-legitimate <img> tags we
+            # generate below) content included an attacker-chosen URL would
+            # turn PDF generation into an SSRF primitive. allowed_hosts pins
+            # every fetch to our own Supabase project; nothing else may be
+            # reached, local files included (base_dir=None).
+            supabase_host = urlsplit(settings.supabase_url).hostname
+            resource_policy = ResourceAccessPolicy(
+                allow_remote=True,
+                allow_private_networks=False,
+                allowed_hosts=frozenset({supabase_host}) if supabase_host else frozenset(),
+                base_dir=None,
+                allow_local_outside_base=False,
+            )
+
             pdf_buffer = io.BytesIO()
-            pisa_status = pisa.CreatePDF(html_content, dest=pdf_buffer)
-            
+            pisa_status = pisa.CreatePDF(html_content, dest=pdf_buffer, resource_policy=resource_policy)
+
             if pisa_status.err:
                 raise Exception("Failed to compile HTML into PDF using xhtml2pdf.")
             
@@ -74,33 +114,54 @@ class ExportService:
 
     @staticmethod
     def _render_memoir_html(memoir: dict, memories: list, media_assets: list, transcripts: list) -> str:
-        """Generates a high-end, printable book layout HTML string."""
-        memoir_title = memoir.get("title", "My Memoir")
-        memoir_description = memoir.get("description", "A curated collection of life memories.")
+        """
+        Generates a high-end, printable book layout HTML string.
+
+        Every user-supplied string (titles, body text, captions, transcripts,
+        the memoir's own title/description) is html.escape()'d before
+        interpolation. This isn't just a layout concern: xhtml2pdf fetches
+        <img>/<link> targets it finds while rendering, so an UNescaped
+        `<img src="http://attacker/…">` typed into a memory would make this
+        server issue an outbound request to an address the attacker chose —
+        escaping means that text renders as inert, visible characters instead
+        of becoming a tag at all.
+        """
+        esc = html.escape
+        # memoir has no "title" column (only subject_name) — this always fell
+        # back to the placeholder before.
+        memoir_title = esc(memoir.get("subject_name") or "My Memoir")
+        memoir_description = esc(memoir.get("description") or "A curated collection of life memories.")
 
         memories_html = ""
         for mem in memories:
-            title = mem.get("title") or "Untitled Entry"
-            date = mem.get("occurred_start") or mem.get("created_at", "")[:10]
-            body = mem.get("body_text") or ""
+            title = esc(mem.get("title") or "Untitled Entry")
+            date = esc(mem.get("occurred_start") or mem.get("created_at", "")[:10])
+            body = esc(mem.get("body_text") or "").replace(chr(10), "<br>")
 
             memories_html += f"""
             <div class="memory-entry">
                 <div class="memory-meta">{date}</div>
                 <h2>{title}</h2>
-                <div class="memory-body">{body.replace(chr(10), '<br>')}</div>
+                <div class="memory-body">{body}</div>
             </div>
             """
 
-        # Render media photo gallery if any exist
+        # Render media photo gallery if any exist. Readers/PDFs never get the
+        # raw storage_key — the bucket is private, so the raw path is just a
+        # broken placeholder anyway — they get a signed URL, exactly like the
+        # rest of the app already does for playback.
         photos_html = ""
         for ma in media_assets:
             if ma.get("kind") == "photo" and ma.get("storage_key"):
-                img_url = ma.get("storage_key")
-                caption = ma.get("caption") or ""
+                img_url = storage_adapter.create_playback_url(
+                    ma["storage_key"], ttl_seconds=EXPORT_IMAGE_SIGNED_URL_TTL_SECONDS
+                )
+                if not img_url:
+                    continue
+                caption = esc(ma.get("caption") or "")
                 photos_html += f"""
                 <div class="photo-container">
-                    <img src="{img_url}" alt="Memory photo" />
+                    <img src="{esc(img_url)}" alt="Memory photo" />
                     {f'<p class="photo-caption">{caption}</p>' if caption else ''}
                 </div>
                 """
@@ -108,7 +169,7 @@ class ExportService:
         # Render audio transcripts section if any exist
         transcripts_html = ""
         for t in transcripts:
-            t_text = t.get("display_text") or ""
+            t_text = esc(t.get("display_text") or "")
             if t_text:
                 transcripts_html += f"""
                 <div class="transcript-box">

@@ -7,24 +7,6 @@ for participant authorizations and media asset metadata persistence.
 from src.integrations.supabase_client import supabase
 from src.integrations.supabase_client import supabase_admin
 
-def fetch_participant(memoir_id: str, user_id: str):
-    """
-    Queries the database to verify if a user is an authorized participant of a memoir.
-
-    Args:
-        memoir_id (str): The unique identifier of the target memoir.
-        user_id (str): The unique identifier of the user.
-
-    Returns:
-        Any: The database query result object containing participant data.
-    """
-    return supabase.table("memoir_participant") \
-        .select("id") \
-        .eq("memoir_id", memoir_id) \
-        .eq("user_id", user_id) \
-        .is_("removed_at", "null") \
-        .execute()
-
 
 def insert_media_metadata(media_data: dict):
     """

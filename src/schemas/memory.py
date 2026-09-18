@@ -18,7 +18,9 @@ class MemoryCreateRequest(BaseModel):
     body_text: Optional[str] = Field(None, max_length=10000, description="Rich text content of the memory")
     
     # Enforce allowed status values via Literal to prevent typo 500 errors
-    status: Literal["draft", "saved"] = Field("draft", description="Publication status of the memory")
+    # Must match the public.memory_status Postgres enum exactly (draft/submitted) --
+    # "saved" is not a valid value there and every write with it 500s at the DB layer.
+    status: Literal["draft", "submitted"] = Field("draft", description="Publication status of the memory")
     
     # Use native date types instead of raw strings so 'tomorrow' or invalid strings fail with 422
     occurred_start: Optional[date] = Field(None, description="Start date of when the memory took place")

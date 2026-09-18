@@ -7,10 +7,10 @@ fully decoupled from direct database infrastructure calls.
 
 from fastapi import HTTPException, status
 from src.schemas.memory import MemoryCreateRequest
-from src.integrations import memory_repository
-from src.domain.authorization import verify_active_participant
+from src.integrations import memory_repository, participant_repository
+from src.domain.authorization import verify_active_participant, assert_memoir_editable
 from src.integrations import storage_adapter
-from src.domain.transcription_service import transcribe_and_store_audio  # <-- Import transcription service
+from src.domain.transcription_service import enqueue_transcription, compute_effective_transcription_status
 from src.integrations.supabase_client import supabase  # <-- Required for querying transcript table directly if needed
 
 class MemoryService:
@@ -20,16 +20,17 @@ class MemoryService:
     """
 
     @classmethod
-    def create_memory(cls, payload: MemoryCreateRequest, user_id: str) -> dict:        
+    def create_memory(cls, payload: MemoryCreateRequest, user_id: str, background_tasks=None) -> dict:
         """
-        Validates participant permissions, normalizes timeline and date parameters, 
+        Validates participant permissions, normalizes timeline and date parameters,
         persists the new memory entry, and maps any attached media asset IDs.
         """
         participant = verify_active_participant(
-            str(payload.memoir_id), 
-            user_id, 
+            str(payload.memoir_id),
+            user_id,
             required_roles=["owner", "admin", "contributor"]
         )
+        assert_memoir_editable(str(payload.memoir_id))
         participant_id = participant["id"]
 
         # Timeline Date: Pass through exactly what the user sent without inventing defaults
@@ -93,37 +94,20 @@ class MemoryService:
                     detail=f"Failed to link media assets to memory: {str(e)}"
                 )
 
-            # =========================================================================
-            # INTEGRATION POINT: Trigger AssemblyAI Transcription for newly attached audio
-            # =========================================================================
-            for media_id in payload.media_asset_ids:
-                print(f"DEBUG: Checking media_id {media_id} for transcription trigger...")
-                
-                # Fetch asset record securely via the repository
-                asset_record = memory_repository.fetch_media_asset_record(str(media_id))
-                
-                print(f"DEBUG: Fetched asset record from DB: {asset_record}")
-
-                if asset_record and asset_record.get("kind") == "audio":
-                    storage_key = asset_record.get("storage_key")
-                    print(f"DEBUG: Audio asset matched! Storage key found: {storage_key}")
-                    
-                    if storage_key:
-                        try:
-                            print(f"DEBUG: Invoking transcribe_and_store_audio for asset {media_id}...")
-                            transcribe_and_store_audio(
-                                media_asset_id=str(media_id),
-                                memoir_id=str(payload.memoir_id),
-                                storage_key=storage_key
-                            )
-                            print(f"DEBUG: Transcription task processed successfully for {media_id}")
-                        except Exception as trig_err:
-                            print(f"ERROR: Failed to trigger transcription: {str(trig_err)}")
-                    else:
-                        print(f"ERROR: Audio asset {media_id} has a missing storage_key!")
-                else:
-                    asset_kind = asset_record.get('kind') if asset_record else 'Not Found'
-                    print(f"DEBUG: Asset {media_id} skipped (Kind: {asset_kind})")
+            # Queue transcription for any newly-attached audio assets. This runs
+            # AFTER insert_memory_media has committed above, and only actually
+            # executes once this request has returned a response (BackgroundTasks
+            # semantics) — the browser never waits on AssemblyAI.
+            if background_tasks is not None:
+                for media_id in payload.media_asset_ids:
+                    asset_record = memory_repository.fetch_media_asset_record(str(media_id))
+                    if asset_record and asset_record.get("kind") == "audio" and asset_record.get("storage_key"):
+                        enqueue_transcription(
+                            media_asset_id=str(media_id),
+                            memoir_id=str(payload.memoir_id),
+                            storage_key=asset_record["storage_key"],
+                            background_tasks=background_tasks,
+                        )
         return new_memory
     
     @classmethod
@@ -146,43 +130,54 @@ class MemoryService:
 
         memories = res.data if res and res.data else []
 
-        # 3. Hydrate media assets with secure playback URLs and transcript records
-        hydrated_memories = []
+        # 3a. First pass: hydrate playback URLs, and collect every audio asset ID
+        # up front instead of querying its transcript one at a time in the loop
+        # below (FR03: "a single database request rather than separate requests
+        # for each item" — query count must not grow with the number of memories).
+        audio_asset_ids = []
         for mem in memories:
             media_list = []
             raw_links = mem.pop("memory_media", [])
             for link in raw_links:
                 asset = link.get("media_asset")
-                if asset:
-                    storage_key = asset.get("storage_key")
-                    playback_url = None
-                    if storage_key:
-                        try:
-                            playback_url = storage_adapter.create_playback_url(storage_key)
-                        except Exception:
-                            playback_url = None
-                    
-                    asset["playback_url"] = playback_url
+                if not asset:
+                    continue
 
-                    # =========================================================================
-                    # INTEGRATION POINT: Hydrate transcript data if the media asset is audio
-                    # =========================================================================
-                    if asset.get("kind") == "audio":
-                        asset_id = asset.get("id")
-                        try:
-                            transcript_res = supabase.table("transcript").select("*").eq("media_asset_id", asset_id).maybe_single().execute()
-                            asset["transcript"] = transcript_res.data if transcript_res and transcript_res.data else None
-                        except Exception:
-                            asset["transcript"] = None
-                    else:
-                        asset["transcript"] = None
+                storage_key = asset.get("storage_key")
+                try:
+                    asset["playback_url"] = storage_adapter.create_playback_url(storage_key) if storage_key else None
+                except Exception:
+                    asset["playback_url"] = None
 
-                    media_list.append(asset)
-            
+                if asset.get("kind") == "audio":
+                    audio_asset_ids.append(asset["id"])
+
+                media_list.append(asset)
             mem["media_assets"] = media_list
-            hydrated_memories.append(mem)
 
-        return hydrated_memories
+        # 3b. One batched transcript fetch for every audio asset across the whole page.
+        transcripts_by_asset_id = {}
+        if audio_asset_ids:
+            try:
+                transcripts_res = supabase.table("transcript").select("*").in_("media_asset_id", audio_asset_ids).execute()
+                for row in (transcripts_res.data or []):
+                    transcripts_by_asset_id[row["media_asset_id"]] = row
+            except Exception:
+                transcripts_by_asset_id = {}
+
+        # 3c. Second pass: attach each asset's transcript (or None) from the map,
+        # and compute the effective status (overrides a stalled 'processing' job —
+        # BackgroundTasks has no worker heartbeat, so this is how a dead job
+        # surfaces instead of spinning forever).
+        for mem in memories:
+            for asset in mem["media_assets"]:
+                if asset.get("kind") == "audio":
+                    asset["transcript"] = transcripts_by_asset_id.get(asset["id"])
+                    asset["transcription_status"] = compute_effective_transcription_status(asset)
+                else:
+                    asset["transcript"] = None
+
+        return memories
         
     @classmethod
     def delete_memory(cls, memoir_id: str, memory_id: str, user_id: str) -> dict:
@@ -190,7 +185,7 @@ class MemoryService:
         Safely soft-deletes a memory record after confirming the user is either 
         the memory's author or a memoir owner/admin.
         """
-        participant_res = memory_repository.fetch_participant(memoir_id, user_id)
+        participant_res = participant_repository.fetch_participant(memoir_id, user_id)
         if not participant_res.data:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
@@ -198,8 +193,10 @@ class MemoryService:
             )
         
         participant = participant_res.data[0]
-        user_role = participant.get("role") 
+        user_role = participant.get("role")
         participant_id = participant.get("id")
+
+        assert_memoir_editable(memoir_id)
 
         try:
             mem_res = memory_repository.fetch_memory_by_id(memory_id, memoir_id)
@@ -223,10 +220,10 @@ class MemoryService:
                 detail="You do not have permission to delete this memory."
             )
 
-        if memory.get("status") == "saved":
+        if memory.get("status") == "submitted":
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Cannot delete a saved/finalized memory."
+                detail="Cannot delete a submitted/finalized memory."
             )
 
         try:

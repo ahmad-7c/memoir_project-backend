@@ -8,18 +8,6 @@ enforcing strict multi-tenant memoir_id isolation.
 from src.integrations.supabase_client import supabase_admin
 
 
-def fetch_participant(memoir_id: str, user_id: str):
-    """
-    Queries the database to verify if a user is an authorized participant of a memoir.
-    """
-    return supabase_admin.table("memoir_participant") \
-        .select("*") \
-        .eq("memoir_id", memoir_id) \
-        .eq("user_id", user_id) \
-        .is_("removed_at", "null") \
-        .execute()
-
-
 def insert_memory(memory_data: dict):
     """
     Persists a new memory record into the database table.
@@ -43,7 +31,7 @@ def fetch_memoir_feed_records(memoir_id: str, limit: int = 20, offset: int = 0):
         .select(
             "id, memoir_id, author_participant_id, title, body_text, status, "
             "occurred_start, occurred_end, occurred_precision, date_source, created_at, "
-            "memory_media(media_asset(*))"
+            "chapter_id, memory_media(media_asset(*))"
         ) \
         .eq("memoir_id", memoir_id) \
         .is_("deleted_at", "null") \
@@ -110,7 +98,16 @@ def fetch_media_asset_record(media_asset_id: str):
 
 def upsert_transcript_record(transcript_payload: dict):
     """
-    Saves or updates the AI transcript in the database, 
+    Saves or updates the AI transcript in the database,
     keeping DB operations isolated from integration logic.
     """
     return supabase_admin.table("transcript").upsert(transcript_payload).execute()
+
+def update_media_asset_transcription_status(media_asset_id: str, transcription_status: str):
+    """
+    Updates the transcription lifecycle status on a media asset row.
+    """
+    return supabase_admin.table("media_asset") \
+        .update({"transcription_status": transcription_status}) \
+        .eq("id", media_asset_id) \
+        .execute()
