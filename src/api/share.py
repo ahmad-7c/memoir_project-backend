@@ -101,7 +101,7 @@ async def read_shared_memoir(token: str, authorization: Optional[str] = Header(N
         subject_died_on=memoir.get("subject_died_on"),
         subject_is_living=bool(memoir.get("subject_is_living")),
         description=memoir.get("description"),
-        can_comment=memoir.get("comment_policy") == "public",
+        can_comment=memoir.get("comment_policy") == "anyone_who_can_view",
         memories=memories,
     )
     return {"success": True, "message": "Operation successful", "data": data}

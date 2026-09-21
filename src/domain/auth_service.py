@@ -141,6 +141,7 @@ class AuthService:
 
         user_id = response.user.id
         access_token = response.session.access_token
+        refresh_token = response.session.refresh_token
 
         # Update last_login_at timestamp in user_account table via repository (non-blocking)
         try:
@@ -153,5 +154,52 @@ class AuthService:
             "user_id": user_id,
             "email": response.user.email,
             "access_token": access_token,
+            "refresh_token": refresh_token,
             "message": "Login successful."
+        }
+
+    @staticmethod
+    def refresh_session(refresh_token: str) -> dict:
+        """
+        Exchanges a still-valid refresh token for a new access token (and a
+        rotated refresh token), so a browser session can outlive the 1-hour
+        access-token cookie without forcing the user back through /login.
+
+        Args:
+            refresh_token (str): The refresh token from the httpOnly refresh cookie.
+
+        Returns:
+            dict: A dictionary containing the user ID, email, new access token,
+            and rotated refresh token.
+
+        Raises:
+            HTTPException (401): If no refresh token was supplied, or Supabase
+            rejects it (expired, revoked, or already used/rotated).
+        """
+        if not refresh_token:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="No active session to refresh. Please sign in again."
+            )
+
+        try:
+            response = auth_repository.auth_refresh_session(refresh_token)
+        except Exception:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Your session has expired. Please sign in again."
+            )
+
+        if not response or not response.session or not response.user:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Your session has expired. Please sign in again."
+            )
+
+        return {
+            "user_id": response.user.id,
+            "email": response.user.email,
+            "access_token": response.session.access_token,
+            "refresh_token": response.session.refresh_token,
+            "message": "Session refreshed.",
         }

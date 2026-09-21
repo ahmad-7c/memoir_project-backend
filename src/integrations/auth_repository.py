@@ -48,6 +48,20 @@ def auth_sign_in(email: str, password: str):
     })
 
 
+def auth_refresh_session(refresh_token: str):
+    """
+    Exchanges a still-valid refresh token for a new Supabase session (a new
+    access_token, plus a rotated refresh_token).
+
+    Args:
+        refresh_token (str): The refresh token previously issued at login/signup.
+
+    Returns:
+        Any: The Supabase auth response object containing the new session and user data.
+    """
+    return supabase.auth.refresh_session(refresh_token)
+
+
 def update_last_login(user_id: str, timestamp: str):
     """
     Updates the last login timestamp record for a specific user account.

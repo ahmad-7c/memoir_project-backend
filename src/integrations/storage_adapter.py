@@ -111,16 +111,19 @@ def create_signed_upload(key: str) -> SignedUpload:
     )
 
 
-def object_exists(key: str) -> int | None:
+def get_uploaded_object_info(key: str) -> dict | None:
     """
-    Queries cloud storage directly to confirm whether a file physically exists.
-    Acts as the source of truth rather than trusting browser completion claims.
+    Queries cloud storage directly to confirm whether a file physically exists,
+    and returns what was actually stored (size, content type). Acts as the
+    source of truth rather than trusting browser completion claims or the
+    mime_type/byte_size the client reports back at metadata-save time —
+    those are re-validated against this, not the other way around.
 
     Args:
         key (str): The storage path key to check.
 
     Returns:
-        int | None: The file size in bytes if found, otherwise None.
+        dict | None: {"size": int, "mimetype": str | None} if found, else None.
     """
     folder, _, filename = key.rpartition("/")
     try:
@@ -134,7 +137,10 @@ def object_exists(key: str) -> int | None:
     for item in items or []:
         if item.get("name") == filename:
             meta = item.get("metadata") or {}
-            return meta.get("size")
+            size = meta.get("size")
+            if size is None:
+                return None
+            return {"size": size, "mimetype": meta.get("mimetype")}
     return None
 
 

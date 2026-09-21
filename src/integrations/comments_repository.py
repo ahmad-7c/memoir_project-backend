@@ -94,7 +94,7 @@ class CommentsRepository:
             raise
         except Exception as e:
             raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Error inserting comment: {str(e)}"
             )
 
@@ -120,7 +120,7 @@ class CommentsRepository:
             raise
         except Exception as e:
             raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Error inserting comment: {str(e)}"
             )
 

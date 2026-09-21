@@ -10,7 +10,6 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import jwt
-from fastapi import Header, HTTPException, status
 from pydantic import BaseModel
 
 from src.core.config import settings
@@ -53,20 +52,6 @@ def _context_from_payload(payload: dict) -> ShareContext:
     )
 
 
-def decode_reader_token(token: str) -> ShareContext:
-    """Strictly decodes a reader token. Raises 401 on anything wrong with it."""
-    try:
-        payload = jwt.decode(token, settings.reader_jwt_secret, algorithms=[READER_TOKEN_ALGORITHM])
-        if payload.get("type") != READER_TOKEN_TYPE:
-            raise jwt.InvalidTokenError("Not a reader token")
-    except jwt.PyJWTError:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Your session has expired. Please enter the password again."
-        )
-    return _context_from_payload(payload)
-
-
 def try_decode_reader_token(token: Optional[str]) -> Optional[ShareContext]:
     """Non-raising variant for endpoints that accept EITHER a reader or an owner token."""
     if not token:
@@ -105,21 +90,3 @@ def extract_bearer_token(authorization: Optional[str]) -> Optional[str]:
     if not authorization or not authorization.startswith("Bearer "):
         return None
     return authorization.split(" ", 1)[1].strip() or None
-
-
-def get_share_context(authorization: Optional[str] = Header(None)) -> ShareContext:
-    """
-    FastAPI dependency for routes that require reader access specifically (e.g.
-    posting a comment as a reader). Resolution order:
-      1. Missing/invalid/expired reader token -> 401 (frontend re-prompts for password).
-      2. Otherwise -> the decoded ShareContext.
-    Link revocation / visibility / publish-state checks happen where the memoir_id
-    is resolved against the database, not here — a token can outlive those changes.
-    """
-    token = extract_bearer_token(authorization)
-    if not token:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Reader session required. Please enter the password again."
-        )
-    return decode_reader_token(token)

@@ -40,6 +40,10 @@ class Settings(BaseSettings):
     # which only surfaces a missing key the first time someone clicks "Organize".
     gemini_api_key: str = Field(..., validation_alias="GEMINI_API_KEY")
 
+    # Configurable so a model bump doesn't require a code change/redeploy,
+    # and so it isn't repeated (and drift-able) across call sites.
+    gemini_model: str = Field("gemini-3.6-flash", validation_alias="GEMINI_MODEL")
+
 
     # FIXED: Added cors_origins so main.py can dynamically read allowed origins from the environment
     cors_origins: List[str] = Field(
@@ -103,3 +107,13 @@ SUPABASE_JWKS_URL = settings.supabase_jwks_url
 # doesn't outlive the token it holds.
 ACCESS_TOKEN_COOKIE_NAME = "access_token"
 ACCESS_TOKEN_COOKIE_MAX_AGE = 3600
+
+# httpOnly refresh-token cookie. Supabase refresh tokens are rotated on each
+# use and aren't tied to the access token's 1-hour lifetime -- 30 days gives
+# a browser session a normal "stay signed in" lifetime without the access
+# token itself living that long. Scoped to /api/auth only (not "/") since
+# it only ever needs to reach the login/refresh/logout endpoints, unlike the
+# access token cookie which every API route needs.
+REFRESH_TOKEN_COOKIE_NAME = "refresh_token"
+REFRESH_TOKEN_COOKIE_MAX_AGE = 60 * 60 * 24 * 30
+REFRESH_TOKEN_COOKIE_PATH = "/api/auth"

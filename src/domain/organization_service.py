@@ -151,7 +151,7 @@ def perform_background_organization(memoir_id: str) -> None:
         ]
 
         response = _get_client().chat.completions.create(
-            model="gemini-3.6-flash",
+            model=settings.gemini_model,
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": json.dumps(payload_for_llm)},
@@ -314,7 +314,7 @@ def chat_with_archive(memoir_id: str, user_id: str, message: str, history: List[
 
     try:
         response = _get_client().chat.completions.create(
-            model="gemini-3.6-flash",
+            model=settings.gemini_model,
             messages=messages,
         )
         return response.choices[0].message.content

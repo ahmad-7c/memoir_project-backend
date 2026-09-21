@@ -18,6 +18,7 @@ from src.core.config import (
     STORAGE_TIER_HOT,
     TRANSCRIPTION_STATUS_PENDING,
     TRANSCRIPTION_STATUS_SKIPPED,
+    settings,
 )
 
 
@@ -111,15 +112,42 @@ class MediaService:
         # isn't actually in storage yet, this is NOT a completed upload — refuse
         # to save metadata for it rather than saving a row that points at nothing.
         try:
-            storage_byte_size = storage_adapter.object_exists(payload.storage_key)
+            object_info = storage_adapter.get_uploaded_object_info(payload.storage_key)
         except Exception as exc:
             logger.warning(f"Could not verify file existence for key {payload.storage_key}: {exc}")
-            storage_byte_size = None
+            object_info = None
 
-        if not storage_byte_size:
+        if not object_info:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="We couldn't confirm this upload finished. Please wait a moment and try again."
+            )
+
+        storage_byte_size = object_info["size"]
+
+        # AUDIT FIX: a presigned URL only controls WHERE a client may write, not
+        # what or how much — re-check the actual uploaded object against the
+        # same limits enforced at presign time, since nothing upstream of this
+        # does. Reject and clean up rather than cataloging an over-limit file.
+        if storage_byte_size > settings.media_max_bytes:
+            storage_adapter.remove_object(payload.storage_key)
+            raise HTTPException(
+                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                detail="That file is larger than the maximum allowed upload size.",
+            )
+
+        try:
+            storage_adapter.validate_upload(payload.mime_type)
+        except HTTPException:
+            storage_adapter.remove_object(payload.storage_key)
+            raise
+
+        stored_mimetype = object_info.get("mimetype")
+        if stored_mimetype and stored_mimetype not in storage_adapter.ALLOWED_MIME:
+            storage_adapter.remove_object(payload.storage_key)
+            raise HTTPException(
+                status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+                detail="That file type isn't supported. Try a photo or a voice recording.",
             )
 
         # 2. KIND-SPECIFIC VALIDATION: Ensure audio and video assets provide a valid duration

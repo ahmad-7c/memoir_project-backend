@@ -111,7 +111,7 @@ class ShareService:
             if not password_ok:
                 raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Incorrect password.")
 
-        can_comment = memoir.get("comment_policy") == "public"
+        can_comment = memoir.get("comment_policy") == "anyone_who_can_view"
 
         reader_token = issue_reader_token(
             share_link_id=str(link["id"]),

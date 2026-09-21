@@ -3,8 +3,15 @@
 @description FastAPI router for user registration and authentication endpoints.
 """
 
-from fastapi import APIRouter, Response, status
-from src.core.config import ACCESS_TOKEN_COOKIE_MAX_AGE, ACCESS_TOKEN_COOKIE_NAME, settings
+from fastapi import APIRouter, Request, Response, status
+from src.core.config import (
+    ACCESS_TOKEN_COOKIE_MAX_AGE,
+    ACCESS_TOKEN_COOKIE_NAME,
+    REFRESH_TOKEN_COOKIE_MAX_AGE,
+    REFRESH_TOKEN_COOKIE_NAME,
+    REFRESH_TOKEN_COOKIE_PATH,
+    settings,
+)
 from src.schemas.auth import UserRegisterRequest, UserLoginRequest # Import login request schema
 from src.domain.auth_service import AuthService
 
@@ -29,6 +36,24 @@ def _set_access_token_cookie(response: Response, access_token: str) -> None:
     )
 
 
+def _set_refresh_token_cookie(response: Response, refresh_token: str) -> None:
+    """
+    Issues the refresh token as its own httpOnly cookie, scoped to /api/auth
+    only -- it never needs to leave that path, unlike the access token which
+    every API route needs. Lets a session survive past the 1-hour access
+    token via POST /api/auth/refresh instead of forcing a fresh /login.
+    """
+    response.set_cookie(
+        key=REFRESH_TOKEN_COOKIE_NAME,
+        value=refresh_token,
+        httponly=True,
+        secure=settings.cookie_secure,
+        samesite=settings.cookie_samesite,
+        path=REFRESH_TOKEN_COOKIE_PATH,
+        max_age=REFRESH_TOKEN_COOKIE_MAX_AGE,
+    )
+
+
 @router.post("/signup", status_code=status.HTTP_201_CREATED)
 def register_user_endpoint(payload: UserRegisterRequest, response: Response):
     """
@@ -40,9 +65,12 @@ def register_user_endpoint(payload: UserRegisterRequest, response: Response):
     result = AuthService.register_user(payload)
     user_data = result.get("user", {})
     access_token = result.get("access_token")
+    refresh_token = result.get("refresh_token")
 
     if access_token:
         _set_access_token_cookie(response, access_token)
+    if refresh_token:
+        _set_refresh_token_cookie(response, refresh_token)
 
     return {
         "success": True,
@@ -64,6 +92,8 @@ def login_user_endpoint(payload: UserLoginRequest, response: Response):
     """Authenticates an existing user and starts their session via an httpOnly cookie."""
     result = AuthService.login_user(payload)
     _set_access_token_cookie(response, result["access_token"])
+    if result.get("refresh_token"):
+        _set_refresh_token_cookie(response, result["refresh_token"])
 
     return {
         "success": True,
@@ -78,11 +108,39 @@ def login_user_endpoint(payload: UserLoginRequest, response: Response):
     }
 
 
+@router.post("/refresh", status_code=status.HTTP_200_OK)
+def refresh_session_endpoint(request: Request, response: Response):
+    """
+    Exchanges the httpOnly refresh-token cookie for a new access token (and a
+    rotated refresh token), so a session can outlive the 1-hour access-token
+    cookie without the user losing in-progress work and having to sign in
+    again. The frontend calls this on a 401 (or proactively before the access
+    token's known expiry) instead of redirecting straight to /login.
+    """
+    refresh_token = request.cookies.get(REFRESH_TOKEN_COOKIE_NAME)
+    result = AuthService.refresh_session(refresh_token)
+
+    _set_access_token_cookie(response, result["access_token"])
+    if result.get("refresh_token"):
+        _set_refresh_token_cookie(response, result["refresh_token"])
+
+    return {
+        "success": True,
+        "message": result.get("message", "Session refreshed."),
+        "authenticated": True,
+        "data": {
+            "user_id": result.get("user_id"),
+            "email": result.get("email"),
+        }
+    }
+
+
 @router.post("/logout", status_code=status.HTTP_200_OK)
 def logout_user_endpoint(response: Response):
     """
-    Clears the session cookie. This is the only way to end a session now that
-    the token is httpOnly -- frontend JS has no way to delete it itself.
+    Clears the session cookies. This is the only way to end a session now that
+    the tokens are httpOnly -- frontend JS has no way to delete them itself.
     """
     response.delete_cookie(key=ACCESS_TOKEN_COOKIE_NAME, path="/")
+    response.delete_cookie(key=REFRESH_TOKEN_COOKIE_NAME, path=REFRESH_TOKEN_COOKIE_PATH)
     return {"success": True, "message": "Logged out."}

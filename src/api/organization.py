@@ -80,6 +80,34 @@ async def get_organization_status(
     )
 
 
+@organization_router.put("/{memoir_id}/chapters/reorder", status_code=status.HTTP_200_OK)
+async def manual_reorder_chapters(
+    memoir_id: str,
+    payload: ChapterReorderRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Owner-only (R1), blocked on a published memoir (R2). Added to close the
+    R10 gap -- the reference branch had no way to reorder chapters at all.
+
+    Registered before /{memoir_id}/chapters/{chapter_id} so the literal
+    "reorder" path isn't swallowed by the parameterized route.
+    """
+    user_id = _resolve_user_id(current_user)
+    organization_service.verify_owner_access(memoir_id, user_id)
+    assert_memoir_editable(memoir_id)
+
+    existing_ids = set(repo.fetch_chapter_ids_for_memoir(memoir_id))
+    requested_ids = {entry.chapter_id for entry in payload.order}
+    if not requested_ids.issubset(existing_ids):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="One or more chapters do not belong to this memoir."
+        )
+
+    updated = repo.reorder_chapters_in_db(memoir_id, [entry.model_dump() for entry in payload.order])
+    return {"success": True, "message": "Chapter order updated.", "data": updated}
+
+
 @organization_router.put("/{memoir_id}/chapters/{chapter_id}", status_code=status.HTTP_200_OK)
 async def manual_update_chapter(
     memoir_id: str,
@@ -97,31 +125,6 @@ async def manual_update_chapter(
 
     updated_chapter = repo.update_chapter_in_db(chapter_id, memoir_id, title=payload.title, summary=payload.summary)
     return {"success": True, "message": "Chapter updated and locked against future AI changes.", "data": updated_chapter}
-
-
-@organization_router.put("/{memoir_id}/chapters/reorder", status_code=status.HTTP_200_OK)
-async def manual_reorder_chapters(
-    memoir_id: str,
-    payload: ChapterReorderRequest,
-    current_user: dict = Depends(get_current_user),
-):
-    """
-    Owner-only (R1), blocked on a published memoir (R2). Added to close the
-    R10 gap -- the reference branch had no way to reorder chapters at all.
-    """
-    user_id = _resolve_user_id(current_user)
-    organization_service.verify_owner_access(memoir_id, user_id)
-    assert_memoir_editable(memoir_id)
-
-    existing_ids = set(repo.fetch_chapter_ids_for_memoir(memoir_id))
-    requested_ids = {entry.chapter_id for entry in payload.order}
-    if not requested_ids.issubset(existing_ids):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST, detail="One or more chapters do not belong to this memoir."
-        )
-
-    updated = repo.reorder_chapters_in_db(memoir_id, [entry.model_dump() for entry in payload.order])
-    return {"success": True, "message": "Chapter order updated.", "data": updated}
 
 
 @organization_router.put("/{memoir_id}/memories/{memory_id}/move", status_code=status.HTTP_200_OK)
