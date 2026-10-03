@@ -8,14 +8,14 @@ and mounts all modular feature routers.
 import logging
 from contextlib import asynccontextmanager
 from dotenv import load_dotenv
-from src.core.config import settings
+from src.core.config import settings, database_url_for_psycopg
 from src.api.share import owner_router, reader_router
 
 # CRITICAL: load_dotenv() must be called BEFORE any other application modules 
 # are imported so database and storage configurations can read environment variables.
 load_dotenv()  
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 
 # Import modular feature routers
@@ -28,6 +28,7 @@ from src.api.search import router as search_router
 from src.api.export import router as export_router
 from src.api.transcripts import router as transcript_router
 from src.api.organization import organization_router
+from src.api.organize_page import router as organize_page_router
 
 def setup_logging():
     """Configures root logging format and log level for backend services."""
@@ -35,6 +36,13 @@ def setup_logging():
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
     )
+
+
+# Hard ceiling on the readiness probe's connection attempt. Long enough for a
+# cold DNS lookup and a TLS handshake to Supabase, short enough that a wedged
+# database cannot hold an event-loop worker for a noticeable fraction of a
+# health-check interval.
+READINESS_CONNECT_TIMEOUT_SECONDS = 3
 
 
 @asynccontextmanager
@@ -78,8 +86,58 @@ def read_root():
 
 @app.get("/health", tags=["Health"])
 def health_check():
-    """Health check endpoint utilized by container orchestration and deployment monitors."""
+    """
+    Liveness probe. Deliberately does NOT touch the database.
+
+    An ALB or ECS health check that depends on Postgres will, during a database
+    blip, mark every task unhealthy at once and replace all of them -- a
+    thundering herd that cannot possibly help, since the replacement tasks need
+    the same database. Liveness answers only "is this process wedged", and the
+    orchestrator should route on this.
+
+    Use /health/ready for deploy gates and for alerting on data-plane health.
+    """
     return {"status": "healthy"}
+
+
+@app.get("/health/ready", tags=["Health"])
+def readiness_check():
+    """
+    Readiness probe. Verifies the process can actually reach Postgres.
+
+    Returns 503 on failure so a deploy pipeline or a container health check can
+    gate on it. The timeout is short and hard-bounded: this runs on the event
+    loop, and a health check that hangs is worse than one that fails.
+
+    Deliberately uses `psycopg` directly rather than the app's Supabase client
+    or a SQLAlchemy engine -- a pool created per probe would hide connection
+    exhaustion and cost more than it measures.
+    """
+    try:
+        import psycopg
+
+        # `database_url_for_psycopg`, not `settings.database_url`. The configured
+        # URL carries a SQLAlchemy dialect prefix (`postgresql+psycopg://`) that
+        # psycopg rejects outright -- so using it directly makes this probe fail
+        # on every environment, and a deploy gate that is always red is a gate
+        # people learn to ignore.
+        with psycopg.connect(
+            database_url_for_psycopg(),
+            connect_timeout=READINESS_CONNECT_TIMEOUT_SECONDS,
+        ) as conn:
+            with conn.cursor() as cur:
+                cur.execute("select 1")
+                cur.fetchone()
+    except Exception as exc:
+        # Type and message only. A connection string or password can appear in
+        # a driver exception's message, and this response is not authenticated.
+        logging.warning("readiness check failed: %s: %s", type(exc).__name__, exc)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="database unreachable",
+        ) from exc
+
+    return {"status": "ready"}
 
 
 # -----------------------------------------------------------------
@@ -96,3 +154,9 @@ app.include_router(transcript_router)
 app.include_router(organization_router)
 app.include_router(owner_router)
 app.include_router(reader_router)
+
+# Static review console. Registered last so its `/organize/{memoir_id}` path
+# cannot shadow an API route -- and it does not: the API's paths all begin
+# `/api/`, and this one has no prefix. Ordered last anyway, because a catch-all
+# route added later is the kind of thing that should be an explicit decision.
+app.include_router(organize_page_router)

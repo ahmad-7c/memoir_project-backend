@@ -11,7 +11,6 @@ import time
 from datetime import datetime, timezone
 from typing import Optional
 
-import assemblyai as aai
 from fastapi import HTTPException, status
 
 from src.core.config import (
@@ -27,6 +26,7 @@ from src.integrations.memory_repository import (
     update_media_asset_transcription_status,
     upsert_transcript_record,
 )
+from src.integrations.stt import TranscriptionError, transcribe_audio
 from src.integrations.supabase_client import supabase_admin
 
 logger = logging.getLogger(__name__)
@@ -85,6 +85,13 @@ def compute_effective_transcription_status(asset: dict) -> str:
         started_at = datetime.fromisoformat(str(timestamp_raw).replace("Z", "+00:00"))
     except ValueError:
         return current_status
+
+    # A timestamp with no timezone would otherwise produce a naive datetime and
+    # raise TypeError on subtraction — turning a stale job into a 500 instead of
+    # the "stalled, here's a retry" the owner should see. The column stores UTC,
+    # so assuming UTC is correct rather than merely defensive.
+    if started_at.tzinfo is None:
+        started_at = started_at.replace(tzinfo=timezone.utc)
 
     age_seconds = (datetime.now(timezone.utc) - started_at).total_seconds()
     return STALLED if age_seconds > STALL_THRESHOLD_SECONDS else current_status
@@ -203,9 +210,12 @@ def transcribe_and_store_audio(media_asset_id: str, memoir_id: str, storage_key:
 
     # No missing-key check here: settings.assemblyai_api_key has no default,
     # so the app refuses to start at all without it (see src/core/config.py).
-    aai.settings.api_key = settings.assemblyai_api_key
-    transcriber = aai.Transcriber()
-
+    #
+    # The provider call is delegated to the STT router, which owns the
+    # AssemblyAI -> Deepgram failover chain, per-provider circuit breakers and
+    # retries. It used to live inline here, against AssemblyAI only, with no
+    # fallback and a module-level `aai.settings.api_key = ...` mutation that
+    # wasn't thread-safe (concurrent transcriptions shared one credential slot).
     try:
         audio_bytes = None
         for attempt in range(1, 4):
@@ -221,13 +231,11 @@ def transcribe_and_store_audio(media_asset_id: str, memoir_id: str, storage_key:
         if not audio_bytes:
             raise RuntimeError(f"Download returned empty bytes or 404 after retries for key: {storage_key}")
 
-        upload_url = transcriber.upload_file(audio_bytes)
-        transcript_result = transcriber.transcribe(upload_url)
+        # The extension is derived from the stored key server-side; the STT
+        # router whitelists it before it reaches a Content-Type header.
+        result = transcribe_audio(audio_bytes, filename=storage_key.rsplit("/", 1)[-1])
 
-        if transcript_result.status == aai.TranscriptStatus.error:
-            raise RuntimeError(transcript_result.error or "AssemblyAI returned an error status.")
-
-        raw_text = transcript_result.text or ""
+        raw_text = result.text
         has_owner_edit = bool((existing or {}).get("edited_text"))
 
         _save_transcript(
@@ -235,16 +243,22 @@ def transcribe_and_store_audio(media_asset_id: str, memoir_id: str, storage_key:
             raw_text=raw_text,
             # Never overwrite an owner's manual correction with a fresh ASR pass.
             display_text=(existing.get("edited_text") if has_owner_edit else raw_text),
-            engine="assemblyai",
-            provider_job_id=getattr(transcript_result, "id", None),
-            confidence=transcript_result.confidence,
-            language=transcript_result.language_code or "en",
+            engine=result.provider,
+            provider_job_id=result.provider_job_id,
+            confidence=result.confidence,
+            language=result.language,
             error_message=None,
             updated_at=datetime.now(timezone.utc).isoformat(),
         )
         update_media_asset_transcription_status(media_asset_id, TRANSCRIPTION_STATUS_READY)
 
-    except Exception as exc:
+    except TranscriptionError as exc:
+        # Distinct from the generic handler: a chain failure is an infrastructure
+        # problem and is logged at error with the provider chain detail, whereas
+        # the catch-all below covers programming errors.
+        logger.error("Transcription chain failed for media_asset_id=%s: %s", media_asset_id, exc)
+        _mark_failed(media_asset_id, memoir_id, existing, "We couldn't transcribe this recording. You can try again.")
+    except Exception:
         logger.exception("Transcription failed for media_asset_id=%s", media_asset_id)
         _mark_failed(media_asset_id, memoir_id, existing, "We couldn't transcribe this recording. You can try again.")
 

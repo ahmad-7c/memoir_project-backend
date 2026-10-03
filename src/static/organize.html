@@ -1,0 +1,850 @@
+<!DOCTYPE html>
+<html lang="en">
+<!--
+  AI Chapter Organization — self-contained review console.
+
+  WHY THIS IS SERVED BY THE BACKEND INSTEAD OF THE FRONTEND APP
+
+  The deployed Next.js frontend's "Generate Chapters" button calls
+  POST /organize and then polls GET /chapters for 60 seconds expecting chapters
+  to appear. The multi-agent pipeline deliberately does NOT write chapters there:
+  it produces a *proposal*, and chapters are written only after the owner
+  confirms. That gap is the feature, not a bug — see root AGENTS.md §3.6 — and
+  it cannot be closed from the backend without removing the review step that
+  keeps the AI from writing to a family record unasked.
+
+  So the review console ships here, as one static file with no build step. It
+  needs no npm install, no bundler, no frontend deploy, and no changes to any
+  deployed asset. Same-origin, so the httpOnly auth cookie is sent without any
+  CORS or SameSite configuration. When the Next.js page is built, this file is
+  deleted and nothing else has to change.
+
+  SECURITY NOTES — the two that matter
+
+  1. Every value from the API is inserted with textContent. There are ZERO
+     innerHTML assignments on this page. Chapter summaries are AI-authored prose
+     about a real, often deceased person, and chapter titles are owner-edited;
+     either one reaching innerHTML is stored XSS served from the API's own
+     origin, with the user's session cookie in reach.
+
+  2. The page ships no third-party resources. No CDN, no font host, no analytics.
+     A supply-chain compromise in a hosted script would run with the user's
+     authenticated session against the memoir API.
+-->
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="robots" content="noindex, nofollow" />
+<title>AI Chapter Organization</title>
+<style>
+  /* All inline. A separate stylesheet would be one more request that could be
+     swapped by a misconfigured CDN; there is no CDN, but inlining removes the
+     question. */
+  :root {
+    --bg: #0f1115; --panel: #171a21; --panel-2: #1e222b; --line: #2a2f3a;
+    --text: #e8eaf0; --muted: #9aa3b2; --accent: #c9a227; --accent-2: #e0b93a;
+    --ok: #4a9d6f; --warn: #c98a2e; --err: #c25450; --info: #5b8ac0;
+    --radius: 10px; --shadow: 0 6px 24px rgba(0,0,0,.35);
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg: #faf9f7; --panel: #ffffff; --panel-2: #f3f1ed; --line: #e2ded6;
+      --text: #1c1e22; --muted: #626a78; --shadow: 0 4px 18px rgba(0,0,0,.08);
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 15px/1.6 ui-serif, Georgia, 'Iowan Old Style', serif;
+  }
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 32px 20px 96px; }
+  h1, h2, h3 { font-weight: 600; letter-spacing: -.01em; }
+  h1 { font-size: 26px; margin: 0 0 4px; }
+  h2 { font-size: 18px; margin: 0 0 12px; }
+  h3 { font-size: 15px; margin: 0 0 6px; }
+  .sub { color: var(--muted); font-size: 14px; margin: 0 0 28px; }
+  .panel {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: var(--radius); padding: 20px; margin-bottom: 16px;
+  }
+  .row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+  .spacer { flex: 1; }
+  button {
+    font: inherit; font-size: 14px; font-family: inherit; cursor: pointer;
+    padding: 9px 16px; border-radius: 8px; border: 1px solid var(--line);
+    background: var(--panel-2); color: var(--text);
+  }
+  button:hover:not(:disabled) { border-color: var(--accent); }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  button.primary {
+    background: var(--accent); border-color: var(--accent); color: #17140b; font-weight: 600;
+  }
+  button.primary:hover:not(:disabled) { background: var(--accent-2); }
+  button.ghost { background: transparent; }
+  button.small { padding: 5px 10px; font-size: 13px; }
+  .badge {
+    display: inline-block; font-size: 11px; letter-spacing: .06em;
+    text-transform: uppercase; padding: 3px 8px; border-radius: 999px;
+    border: 1px solid var(--line); color: var(--muted); font-family: ui-sans-serif, system-ui, sans-serif;
+  }
+  .badge.running { color: var(--info); border-color: var(--info); }
+  .badge.ready   { color: var(--ok);   border-color: var(--ok); }
+  .badge.failed  { color: var(--err);  border-color: var(--err); }
+  .stages { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+  .stage {
+    border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px;
+    font-size: 12px; font-family: ui-sans-serif, system-ui, sans-serif; color: var(--muted);
+    min-width: 96px;
+  }
+  .stage.running { border-color: var(--info); color: var(--info); }
+  .stage.ready   { border-color: var(--ok);   color: var(--ok); }
+  .stage.failed  { border-color: var(--err);  color: var(--err); }
+  .warn-list { margin: 0; padding-left: 18px; }
+  .warn-list li { margin-bottom: 6px; color: var(--muted); font-size: 14px; }
+  .warn-list li.strong { color: var(--text); }
+  .chapter {
+    border: 1px solid var(--line); border-radius: 8px; padding: 14px;
+    margin-bottom: 10px; background: var(--panel-2);
+  }
+  .chapter-head { display: flex; gap: 10px; align-items: baseline; }
+  .chapter summary { margin: 8px 0 0; color: var(--muted); font-size: 14px; white-space: pre-wrap; }
+  .mem {
+    display: flex; gap: 10px; align-items: baseline; padding: 8px 10px;
+    border-radius: 6px; font-size: 14px;
+  }
+  .mem:nth-child(odd) { background: rgba(127,127,127,.05); }
+  .mem .t { font-weight: 500; }
+  .mem .d { color: var(--muted); font-size: 12px; font-family: ui-monospace, monospace; }
+  .mem.unplaced { border-left: 2px solid var(--warn); }
+  .ai-note {
+    font-size: 11px; font-family: ui-sans-serif, system-ui, sans-serif;
+    border: 1px solid var(--line); border-radius: 4px; padding: 1px 6px;
+    color: var(--muted); text-transform: uppercase; letter-spacing: .05em;
+  }
+  textarea, input[type=text] {
+    font: inherit; width: 100%; background: var(--bg); color: var(--text);
+    border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px;
+  }
+  textarea { min-height: 78px; resize: vertical; }
+  textarea:focus, input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+  .chat-log { display: flex; flex-direction: column; gap: 10px; margin-bottom: 12px;
+              max-height: 420px; overflow-y: auto; }
+  .bubble { padding: 10px 13px; border-radius: 10px; max-width: 82%; white-space: pre-wrap; font-size: 14px; }
+  .bubble.user { align-self: flex-end; background: var(--accent); color: #17140b; }
+  .bubble.ai { align-self: flex-start; background: var(--panel-2); border: 1px solid var(--line); }
+  .banner { padding: 11px 14px; border-radius: 8px; margin-bottom: 14px; font-size: 14px; }
+  .banner.err { background: rgba(194,84,80,.12); border: 1px solid var(--err); color: var(--err); }
+  .banner.info { background: rgba(91,138,192,.12); border: 1px solid var(--info); color: var(--info); }
+  .banner.ok { background: rgba(74,157,111,.12); border: 1px solid var(--ok); color: var(--ok); }
+  .hidden { display: none !important; }
+  .stats { display: flex; gap: 20px; font-size: 13px; color: var(--muted); font-family: ui-sans-serif, system-ui, sans-serif; }
+  .stats b { display: block; font-size: 20px; color: var(--text); font-weight: 600; }
+  code { font-family: ui-monospace, monospace; font-size: 12.5px; background: var(--panel-2);
+         padding: 1px 5px; border-radius: 4px; }
+  .foot { color: var(--muted); font-size: 12.5px; margin-top: 26px; line-height: 1.7; }
+  hr { border: 0; border-top: 1px solid var(--line); margin: 18px 0; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <h1>AI Chapter Organization</h1>
+  <p class="sub" id="subtitle">Loading memoir…</p>
+
+  <div id="errorBanner" class="banner err hidden" role="alert"></div>
+  <div id="infoBanner" class="banner info hidden" role="status"></div>
+  <div id="okBanner" class="banner ok hidden" role="status"></div>
+
+  <!-- ============================ 1. SOURCE MATERIAL ==================== -->
+  <section class="panel" id="memoriesPanel">
+    <div class="row">
+      <h2>Your memories</h2>
+      <span class="spacer"></span>
+      <div class="stats">
+        <span><b id="statSubmitted">–</b>submitted</span>
+        <span><b id="statDrafts">–</b>drafts</span>
+        <span><b id="statPlaced">–</b>in chapters</span>
+      </div>
+    </div>
+    <p style="color:var(--muted);font-size:13.5px;margin:10px 0 0">
+      These are your words, exactly as you wrote them. Organizing groups them into
+      chapters and writes a short introduction for each one — it never rewrites,
+      merges, or deletes a memory.
+    </p>
+    <hr />
+    <div id="memoryList" class="hidden"></div>
+    <button class="small ghost hidden" id="toggleMemories" type="button">Show memories</button>
+  </section>
+
+  <!-- ============================ 2. RUN THE PIPELINE =================== -->
+  <section class="panel">
+    <div class="row">
+      <h2>Organize into chapters</h2>
+      <span class="spacer"></span>
+      <span id="statusBadge" class="badge">idle</span>
+    </div>
+    <p style="color:var(--muted);font-size:13.5px;margin:10px 0 14px">
+      Groups related memories into a chronological biography, in several passes.
+      This takes roughly one to three minutes. You will get a proposal to read
+      before anything is written.
+    </p>
+    <div class="row">
+      <button class="primary" id="btnOrganize" type="button">Organize with AI</button>
+      <button id="btnRetry" class="hidden" type="button">Try again</button>
+    </div>
+    <div class="stages" id="stages"></div>
+    <p id="providerNote" class="hidden" style="color:var(--muted);font-size:12.5px;margin-top:12px"></p>
+  </section>
+
+  <!-- ============================ 3. REVIEW ============================= -->
+  <section class="panel hidden" id="proposalPanel">
+    <h2>Review before anything is written</h2>
+    <p style="color:var(--muted);font-size:13.5px;margin:10px 0 14px" id="proposalSummary"></p>
+    <div id="proposalWarnings"></div>
+    <hr />
+    <div id="proposalChapters"></div>
+    <div class="row" style="margin-top:16px">
+      <button class="primary" id="btnApply" type="button">Apply these chapters</button>
+      <button class="ghost" id="btnDismiss" type="button">Generate a new version instead</button>
+      <span class="spacer"></span>
+      <span style="color:var(--muted);font-size:12.5px" id="proposalIdNote"></span>
+    </div>
+  </section>
+
+  <!-- ============================ 4. CHAPTERS ============================ -->
+  <section class="panel hidden" id="chaptersPanel">
+    <div class="row">
+      <h2>Chapters</h2>
+      <span class="spacer"></span>
+      <button class="small ghost" id="btnRefreshChapters" type="button">Refresh</button>
+    </div>
+    <p style="color:var(--muted);font-size:13.5px;margin:10px 0 14px">
+      This is what readers see. Edit any title or introduction — your version is
+      kept and the AI will not overwrite it.
+    </p>
+    <div id="chapterList"></div>
+  </section>
+
+  <!-- ============================ 5. CHAT =============================== -->
+  <section class="panel">
+    <h2>Ask about this memoir</h2>
+    <p style="color:var(--muted);font-size:13.5px;margin:10px 0 14px">
+      Ask the assistant to reorganize, or to tell you what it found. It can only
+      suggest changes — nothing it says is applied without you.
+    </p>
+    <div class="chat-log" id="chatLog"></div>
+    <div class="row">
+      <input type="text" id="chatInput" style="flex:1;min-width:240px"
+             placeholder="e.g. group the 1980s memories together" maxlength="4000" />
+      <button id="btnChat" type="button">Send</button>
+    </div>
+  </section>
+
+  <p class="foot">
+    Nothing is written to your memoir until you press <b>Apply</b>. Your original memories are
+    never modified, merged, or deleted by the AI. Chapter introductions are written by a language
+    model and are labelled as such — please read them before publishing.
+  </p>
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  // ---------------------------------------------------------------------
+  // Memoir id comes from the path: /organize/<uuid>
+  // ---------------------------------------------------------------------
+  var MEMOIR_ID = (function () {
+    var m = window.location.pathname.match(/\/organize\/([0-9a-fA-F-]{16,})/);
+    return m ? m[1] : null;
+  })();
+
+  if (!MEMOIR_ID) {
+    show("errorBanner", "This page needs a memoir id. Open it as /organize/&lt;memoir-id&gt;.");
+    return;
+  }
+
+  var $ = function (id) { return document.getElementById(id); };
+
+  var state = {
+    status: null,
+    proposal: null,
+    pollTimer: null,
+    chatHistory: [],
+    busy: false,
+  };
+
+  // ---------------------------------------------------------------------
+  // HTTP
+  //
+  // `credentials: "same-origin"` is explicit rather than relying on the default.
+  // Auth is an httpOnly cookie, so there is nothing to attach as a header and
+  // nothing this script can read. Same-origin means the browser sends it
+  // automatically -- which is the entire reason this page is served by the API
+  // rather than from a separate host.
+  // ---------------------------------------------------------------------
+  function api(path, options) {
+    options = options || {};
+    return fetch(path, {
+      method: options.method || "GET",
+      credentials: "same-origin",
+      headers: options.body ? { "Content-Type": "application/json" } : {},
+      body: options.body ? JSON.stringify(options.body) : undefined,
+    }).then(function (res) {
+      if (res.status === 204) return null;
+      return res
+        .json()
+        .catch(function () {
+          return null;
+        })
+        .then(function (data) {
+          if (!res.ok) {
+            var err = new Error(detailOf(data) || "Request failed (" + res.status + ")");
+            err.status = res.status;
+            throw err;
+          }
+          return data;
+        });
+    });
+  }
+
+  /** FastAPI's two error shapes: a string detail, or a validation array. */
+  function detailOf(data) {
+    if (!data) return "";
+    if (typeof data.detail === "string") return data.detail;
+    if (Array.isArray(data.detail)) {
+      return data.detail
+        .map(function (d) {
+          return (d.loc && d.loc.length ? d.loc[d.loc.length - 1] + ": " : "") + (d.msg || "Invalid value");
+        })
+        .join(" · ");
+    }
+    return data.message || "";
+  }
+
+  // ---------------------------------------------------------------------
+  // Rendering
+  //
+  // Every API value goes in through textContent. See the note in the header:
+  // there are no innerHTML assignments on this page.
+  // ---------------------------------------------------------------------
+  function el(tag, className, text) {
+    var node = document.createElement(tag);
+    if (className) node.className = className;
+    if (text !== undefined && text !== null) node.textContent = String(text);
+    return node;
+  }
+
+  function clear(node) {
+    while (node.firstChild) node.removeChild(node.firstChild);
+  }
+
+  function show(id, message) {
+    var node = $(id);
+    node.textContent = message;
+    node.classList.remove("hidden");
+  }
+
+  function hideAllBanners() {
+    ["errorBanner", "infoBanner", "okBanner"].forEach(function (id) {
+      $(id).classList.add("hidden");
+    });
+  }
+
+  function notice(message) {
+    show("errorBanner", message);
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+
+  function setBusy(busy) {
+    state.busy = busy;
+    $("btnOrganize").disabled = busy;
+    $("btnApply").disabled = busy;
+    $("btnChat").disabled = busy;
+    $("btnRetry").disabled = busy;
+  }
+
+  function formatDate(value) {
+    if (!value) return "";
+    // A partial date ("1980s", "circa 1962") is passed through verbatim. It is
+    // the author's own wording and forcing a full date would invent precision.
+    var trimmed = String(value).trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) return trimmed;
+    var d = new Date(trimmed + "T00:00:00Z");
+    if (isNaN(d.getTime())) return trimmed;
+    return d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+  }
+
+  // ---------------------------------------------------------------------
+  // 1. Source memories
+  // ---------------------------------------------------------------------
+  function renderMemories(payload) {
+    var memories = (payload && payload.data) || [];
+    var counts = (payload && payload.counts) || {};
+
+    $("statSubmitted").textContent = counts.submitted != null ? counts.submitted : memories.length;
+    $("statDrafts").textContent = counts.drafts != null ? counts.drafts : 0;
+
+    var placed = memories.filter(function (m) { return m.chapter_id; }).length;
+    $("statPlaced").textContent = placed;
+
+    var list = $("memoryList");
+    clear(list);
+
+    if (!memories.length) {
+      $("subtitle").textContent = "This memoir has no submitted memories yet.";
+      $("btnOrganize").disabled = true;
+      $("toggleMemories").classList.add("hidden");
+      return;
+    }
+
+    memories.forEach(function (m) {
+      var row = el("div", "mem" + (m.chapter_id ? "" : " unplaced"));
+      row.appendChild(el("span", "t", m.title || "Untitled"));
+      var when = formatDate(m.occurred_start);
+      if (when) row.appendChild(el("span", "d", when));
+      row.title = m.body_text || "";
+      list.appendChild(row);
+    });
+
+    $("toggleMemories").classList.remove("hidden");
+  }
+
+  function loadMemories() {
+    return api("/api/memoirs/" + MEMOIR_ID + "/organize/memories")
+      .then(renderMemories)
+      .catch(function (err) {
+        if (err.status === 401) {
+          notice("You are not signed in, or your session has expired. Sign in again and reopen this page.");
+        } else if (err.status === 404) {
+          notice("That memoir does not exist, or it is not yours.");
+        } else {
+          notice("Could not load your memories: " + err.message);
+        }
+      });
+  }
+
+  // ---------------------------------------------------------------------
+  // 2. Pipeline status
+  // ---------------------------------------------------------------------
+  function renderStatus(status) {
+    state.status = status;
+    var badge = $("statusBadge");
+    var kind = (status && status.status) || "none";
+    badge.textContent = kind;
+    badge.className = "badge" + (kind === "running" || kind === "queued" ? " running" : kind === "ready" ? " ready" : kind === "failed" || kind === "stalled" ? " failed" : "");
+
+    var stages = $("stages");
+    clear(stages);
+    ((status && status.stages) || []).forEach(function (s) {
+      var node = el("div", "stage " + (s.status || ""), s.name || s.status);
+      stages.appendChild(node);
+    });
+
+    var provider = status && status.provider_used;
+    if (provider) {
+      var note = $("providerNote");
+      // Names a provider, never a key. Surfaced so a persistently misconfigured
+      // fallback chain is visible from the outside.
+      note.textContent = "This run was served by " + provider + ".";
+      note.classList.remove("hidden");
+    }
+
+    if (kind === "failed" || kind === "stalled") {
+      var msg = (status && status.error_message) || "";
+      notice(
+        (kind === "stalled"
+          ? "The last run stopped partway through"
+          : "The last run failed") +
+          (msg ? ": " + msg : ".") +
+          " Nothing was written. Your memories are unchanged — try again."
+      );
+      $("btnRetry").classList.remove("hidden");
+    }
+  }
+
+  function poll() {
+    stopPolling();
+    // 3s. The pipeline is bounded at ORGANIZE_PIPELINE_DEADLINE_SECONDS (180),
+    // so this cannot poll forever, but the stop condition matters anyway: a
+    // spinner that never resolves is worse than an error.
+    state.pollTimer = window.setInterval(function () {
+      api("/api/memoirs/" + MEMOIR_ID + "/organize/status")
+        .then(renderStatus)
+        .catch(function () {
+          /* A dropped poll is not worth alarming about; the next one retries. */
+        });
+    }, 3000);
+  }
+
+  function stopPolling() {
+    if (state.pollTimer) {
+      window.clearInterval(state.pollTimer);
+      state.pollTimer = null;
+    }
+  }
+
+  // ---------------------------------------------------------------------
+  // 3. Proposal review
+  // ---------------------------------------------------------------------
+  function renderProposal(payload) {
+    var box = payload && payload.data;
+    if (!box) {
+      $("proposalPanel").classList.add("hidden");
+      state.proposal = null;
+      return;
+    }
+    state.proposal = box;
+    $("proposalPanel").classList.remove("hidden");
+
+    $("proposalSummary").textContent =
+      box.memories_placed +
+      " of " +
+      box.memories_considered +
+      " memories placed into " +
+      box.plan.chapters.length +
+      " chapters" +
+      (box.memories_unplaced ? ", " + box.memories_unplaced + " left for you to place" : "") +
+      ".";
+
+    // Warnings are the point of this screen. A review that can only show "looks
+    // good" is not a review.
+    var warnBox = $("proposalWarnings");
+    clear(warnBox);
+    if ((box.warnings || []).length) {
+      var ul = el("ul", "warn-list");
+      box.warnings.forEach(function (w, i) {
+        ul.appendChild(el("li", i === 0 ? "strong" : "", w));
+      });
+      warnBox.appendChild(ul);
+    }
+
+    var chaptersBox = $("proposalChapters");
+    clear(chaptersBox);
+    box.plan.chapters.forEach(function (chapter, index) {
+      var node = el("div", "chapter");
+      var head = el("div", "chapter-head");
+      head.appendChild(el("span", "badge", String(index + 1)));
+      head.appendChild(el("h3", null, chapter.title));
+      node.appendChild(head);
+
+      if (chapter.summary) {
+        node.appendChild(el("div", "ai-note", "AI-written introduction"));
+        node.appendChild(el("p", "summary", chapter.summary));
+      }
+      node.appendChild(
+        el(
+          "p",
+          null,
+          (chapter.memory_ids || []).length + " memories"
+        )
+      );
+      chaptersBox.appendChild(node);
+    });
+
+    // What this will destroy, stated before the click rather than after.
+    if (box.chapters_replaced) {
+      $("proposalIdNote").textContent =
+        "Applying replaces " + box.chapters_replaced + " existing chapter(s).";
+    } else {
+      $("proposalIdNote").textContent = "";
+    }
+  }
+
+  function loadProposal() {
+    return api("/api/memoirs/" + MEMOIR_ID + "/organize/proposal")
+      .then(renderProposal)
+      .catch(function (err) {
+        // 404 here means "nothing to review", which is a normal state and not an
+        // error worth showing. The backend uses 404 for both "no proposal" and
+        // "not yours"; only the first is reachable once we are on this page.
+        renderProposal(null);
+      });
+  }
+
+  // ---------------------------------------------------------------------
+  // 4. Chapters
+  // ---------------------------------------------------------------------
+  function renderChapters(chapters) {
+    var panel = $("chaptersPanel");
+    var list = $("chapterList");
+    clear(list);
+
+    if (!chapters || !chapters.length) {
+      panel.classList.add("hidden");
+      return;
+    }
+    panel.classList.remove("hidden");
+
+    chapters.forEach(function (chapter) {
+      var node = el("div", "chapter");
+      var head = el("div", "chapter-head");
+      head.appendChild(el("h3", null, chapter.title));
+
+      if (chapter.edited_by_owner) {
+        head.appendChild(el("span", "badge", "your edit"));
+      } else {
+        head.appendChild(el("span", "badge", "AI"));
+      }
+
+      var edit = el("button", "small ghost", "Edit");
+      edit.type = "button";
+      head.appendChild(edit);
+      node.appendChild(head);
+
+      var memories = chapter.memories || [];
+      node.appendChild(el("p", null, memories.length + " memories"));
+
+      memories.forEach(function (m) {
+        var row = el("div", "mem");
+        row.appendChild(el("span", "t", m.title || "Untitled"));
+        var when = formatDate(m.occurred_start);
+        if (when) row.appendChild(el("span", "d", when));
+        node.appendChild(row);
+      });
+
+      edit.addEventListener("click", function () {
+        openEditor(node, chapter);
+      });
+
+      list.appendChild(node);
+    });
+  }
+
+  function openEditor(container, chapter) {
+    var existing = container.querySelector("form");
+    if (existing) {
+      existing.remove();
+      return;
+    }
+
+    var form = el("form");
+    var titleLabel = el("label", null, "Title");
+    titleLabel.style.fontSize = "13px";
+    titleLabel.style.display = "block";
+    titleLabel.style.marginBottom = "4px";
+
+    var titleInput = document.createElement("input");
+    titleInput.type = "text";
+    titleInput.maxLength = 200;
+    titleInput.value = chapter.title || "";
+
+    var summaryLabel = el("label", null, "Introduction");
+    summaryLabel.style.fontSize = "13px";
+    summaryLabel.style.display = "block";
+    summaryLabel.style.margin = "10px 0 4px";
+
+    var summaryInput = document.createElement("textarea");
+    summaryInput.maxLength = 4000;
+    summaryInput.value = chapter.summary || "";
+
+    var row = el("div", "row");
+    row.style.marginTop = "12px";
+    var save = el("button", "primary small", "Save");
+    save.type = "submit";
+    var cancel = el("button", "small ghost", "Cancel");
+    cancel.type = "button";
+    row.appendChild(save);
+    row.appendChild(cancel);
+
+    form.appendChild(titleLabel);
+    form.appendChild(titleInput);
+    form.appendChild(summaryLabel);
+    form.appendChild(summaryInput);
+    form.appendChild(row);
+    container.appendChild(form);
+
+    titleInput.focus();
+
+    cancel.addEventListener("click", function () {
+      form.remove();
+    });
+
+    form.addEventListener("submit", function (event) {
+      event.preventDefault();
+      setBusy(true);
+      api("/api/memoirs/" + MEMOIR_ID + "/chapters/" + encodeURIComponent(chapter.id), {
+        method: "PUT",
+        body: { title: titleInput.value.trim(), summary: summaryInput.value },
+      })
+        .then(function () {
+          // Reload rather than patch locally: the server is the source of truth
+          // and a stale local edit is how two people end up fighting over a
+          // chapter.
+          return loadChapters();
+        })
+        .catch(function (err) {
+          notice("Could not save: " + err.message);
+        })
+        .finally(function () {
+          setBusy(false);
+        });
+    });
+  }
+
+  function loadChapters() {
+    return api("/api/memoirs/" + MEMOIR_ID + "/chapters")
+      .then(function (payload) {
+        renderChapters((payload && payload.data) || []);
+      })
+      .catch(function () {
+        /* A failed chapter read is not worth a banner; the memories list above
+           is the thing the owner actually needs. */
+      });
+  }
+
+  // ---------------------------------------------------------------------
+  // 5. Chat
+  // ---------------------------------------------------------------------
+  function addBubble(who, text) {
+    var log = $("chatLog");
+    log.appendChild(el("div", "bubble " + who, text));
+    log.scrollTop = log.scrollHeight;
+  }
+
+  function sendChat() {
+    var input = $("chatInput");
+    var message = input.value.trim();
+    if (!message || state.busy) return;
+
+    addBubble("user", message);
+    input.value = "";
+    state.chatHistory.push({ role: "user", content: message });
+
+    setBusy(true);
+    api("/api/memoirs/" + MEMOIR_ID + "/chat", {
+      method: "POST",
+      body: { message: message, history: state.chatHistory.slice(0, -1) },
+    })
+      .then(function (payload) {
+        var reply = (payload && payload.reply) || "";
+        addBubble("ai", reply);
+        state.chatHistory.push({ role: "assistant", content: reply });
+      })
+      .catch(function (err) {
+        addBubble("ai", "That did not work: " + err.message);
+      })
+      .finally(function () {
+        setBusy(false);
+      });
+  }
+
+  // ---------------------------------------------------------------------
+  // Wiring
+  // ---------------------------------------------------------------------
+  $("btnOrganize").addEventListener("click", function () {
+    hideAllBanners();
+    setBusy(true);
+    $("btnRetry").classList.add("hidden");
+
+    api("/api/memoirs/" + MEMOIR_ID + "/organize", { method: "POST" })
+      .then(function () {
+        show("infoBanner", "Working on it. This usually takes one to three minutes.");
+        $("btnOrganize").disabled = true;
+        poll();
+      })
+      .catch(function (err) {
+        setBusy(false);
+        if (err.status === 409) {
+          notice("An organize run is already in progress for this memoir.");
+          poll();
+        } else if (err.status === 403 || err.status === 404) {
+          notice("This memoir is published, or it is not yours. Published memoirs cannot be reorganized.");
+        } else {
+          notice("Could not start: " + err.message);
+        }
+      });
+  });
+
+  $("btnRetry").addEventListener("click", function () {
+    $("btnOrganize").click();
+  });
+
+  $("btnApply").addEventListener("click", function () {
+    if (!state.proposal) return;
+    var chapters = state.proposal.plan.chapters.length;
+
+    setBusy(true);
+    hideAllBanners();
+
+    // The request body carries a proposal id and nothing else. Everything that
+    // gets written was decided server-side; the client cannot influence it.
+    api("/api/memoirs/" + MEMOIR_ID + "/organize/apply", {
+      method: "POST",
+      body: { proposal_id: state.proposal.proposal_id },
+    })
+      .then(function (payload) {
+        show(
+          "okBanner",
+          (payload && payload.message) ||
+            "Applied " + chapters + " chapters. Your original memories were not changed."
+        );
+        stopPolling();
+        renderProposal(null);
+        return Promise.all([loadChapters(), loadMemories(), loadStatus()]);
+      })
+      .catch(function (err) {
+        if (err.status === 409) {
+          // Expired, already handled, or the memoir changed underneath it.
+          // All three mean the same thing to the owner: generate a new one.
+          notice(err.message || "That proposal is no longer valid. Generate a new version.");
+          return loadProposal();
+        }
+        notice("Could not apply: " + err.message);
+      })
+      .finally(function () {
+        setBusy(false);
+      });
+  });
+
+  $("btnDismiss").addEventListener("click", function () {
+    // "Generate a new version" is the same POST -- a new proposal supersedes the
+    // old one server-side, so there is no cancel endpoint and none is needed.
+    $("btnOrganize").click();
+  });
+
+  $("btnRefreshChapters").addEventListener("click", loadChapters);
+  $("btnChat").addEventListener("click", sendChat);
+
+  $("chatInput").addEventListener("keydown", function (event) {
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      sendChat();
+    }
+  });
+
+  $("toggleMemories").addEventListener("click", function () {
+    var list = $("memoryList");
+    var hidden = list.classList.toggle("hidden");
+    this.textContent = hidden ? "Show memories" : "Hide memories";
+  });
+
+  function loadStatus() {
+    return api("/api/memoirs/" + MEMOIR_ID + "/organize/status")
+      .then(renderStatus)
+      .catch(function () {
+        /* A memoir with no run row yet is the normal first-load case. */
+      });
+  }
+
+  // ---------------------------------------------------------------------
+  // Boot
+  // ---------------------------------------------------------------------
+  loadMemories();
+  loadStatus().then(loadChapters).then(loadProposal);
+
+  // If a run is already going when the page opens (a refresh mid-pipeline),
+  // resume watching it. Otherwise the owner sees a static page and thinks it
+  // stopped.
+  var boot = window.setInterval(function () {
+    if (state.status && (state.status.status === "running" || state.status.status === "queued")) {
+      window.clearInterval(boot);
+      poll();
+    }
+  }, 2000);
+
+  window.addEventListener("beforeunload", stopPolling);
+})();
+</script>
+</body>
+</html>

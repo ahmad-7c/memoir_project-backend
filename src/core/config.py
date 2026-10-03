@@ -4,7 +4,7 @@
 using Pydantic BaseSettings.
 """
 
-from typing import List
+from typing import List, Optional
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -44,6 +44,56 @@ class Settings(BaseSettings):
     # and so it isn't repeated (and drift-able) across call sites.
     gemini_model: str = Field("gemini-3.6-flash", validation_alias="GEMINI_MODEL")
 
+    # ---------------------------------------------------------------------
+    # AI provider chains
+    #
+    # Groq is the PRIMARY for AI organization (fast, cheap, and supports
+    # Structured Outputs in strict mode -- constrained decoding, so the JSON
+    # shape is guaranteed rather than merely attempted). Gemini is the
+    # FALLBACK: already integrated, so a Groq outage degrades latency/cost
+    # rather than taking the feature down.
+    #
+    # Fallback providers are Optional because a deployment may legitimately
+    # run with only one -- but a chain with ZERO usable providers is a
+    # misconfiguration and validate_ai_provider_chain() refuses to boot.
+    # A missing fallback key must fail loudly at startup, not silently
+    # degrade into a 500 on a user's request an hour later.
+    # ---------------------------------------------------------------------
+    groq_api_key: Optional[str] = Field(None, validation_alias="GROQ_API_KEY")
+    groq_organize_model: str = Field("openai/gpt-oss-120b", validation_alias="GROQ_ORGANIZE_MODEL")
+
+    # Deepgram is the transcription FALLBACK, deliberately not Groq/Whisper:
+    # Whisper hallucinates text during silence, music and crosstalk. Fabricated
+    # sentences in a dead relative's recording is a worse failure than a
+    # transcription outage. AssemblyAI also reports ~30% fewer hallucinations,
+    # and Deepgram is cheaper per hour and faster. A fallback is not
+    # automatically a good fallback.
+    deepgram_api_key: Optional[str] = Field(None, validation_alias="DEEPGRAM_API_KEY")
+    deepgram_model: str = Field("nova-3", validation_alias="DEEPGRAM_MODEL")
+
+    # Per-attempt timeout. Generous enough for a long context, tight enough
+    # that a hung upstream cannot pin a threadpool slot for the whole
+    # Starlette pool -- with a single-shot provider that is a full outage.
+    ai_request_timeout_seconds: float = Field(30.0, validation_alias="AI_REQUEST_TIMEOUT_SECONDS")
+
+    # Attempts against ONE provider before failing over to the next. >1 so a
+    # transient 429 doesn't cost us a failover, but bounded so a dead provider
+    # can't multiply latency across the whole chain.
+    ai_max_attempts_per_provider: int = Field(2, validation_alias="AI_MAX_ATTEMPTS_PER_PROVIDER")
+
+    # Caps concurrent agent calls. Providers rate-limit on RPM/TPM, so an
+    # unbounded asyncio.gather is a self-inflicted 429.
+    ai_max_concurrency: int = Field(4, validation_alias="AI_MAX_CONCURRENCY")
+
+    # Circuit breaker: after N consecutive provider failures, short-circuit
+    # for a cooldown so a dead provider stops adding its timeout to every
+    # subsequent request instead of failing over on every single call.
+    ai_circuit_failure_threshold: int = Field(3, validation_alias="AI_CIRCUIT_FAILURE_THRESHOLD")
+    ai_circuit_cooldown_seconds: int = Field(60, validation_alias="AI_CIRCUIT_COOLDOWN_SECONDS")
+
+    # Wall-clock ceiling for a whole multi-stage organize pipeline. A job past
+    # this is a bug or a pathological memoir, not a slow success.
+    organize_pipeline_deadline_seconds: int = Field(180, validation_alias="ORGANIZE_PIPELINE_DEADLINE_SECONDS")
 
     # FIXED: Added cors_origins so main.py can dynamically read allowed origins from the environment
     cors_origins: List[str] = Field(
@@ -73,6 +123,12 @@ class Settings(BaseSettings):
             return v
         return ["http://localhost:3000"]
 
+    @field_validator("cookie_samesite")
+    @classmethod
+    def normalize_samesite(cls, v: str) -> str:
+        """Normalizes casing so downstream comparisons don't have to guess."""
+        return v.strip().lower()
+
     model_config = SettingsConfigDict(
         env_file=".env",
         case_sensitive=False,
@@ -81,6 +137,129 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+
+def validate_ai_provider_chain() -> None:
+    """
+    Refuses to boot if a *required* AI capability has zero usable providers.
+
+    Individual provider keys are Optional (a deployment may run with only
+    Groq and no Gemini, and that's legitimate). What is NOT legitimate is a
+    chain with nothing in it — that turns a clear config error into an opaque
+    500 the first time someone clicks "Organize", possibly in production,
+    possibly hours after a deploy. Failing here costs five seconds at boot.
+
+    Called at import time below, so `uvicorn src.main:app` refuses to start.
+    Note this does NOT touch the network: it only checks which keys are
+    present, so a boot-time call can't be slowed down or broken by a provider
+    outage.
+    """
+    problems: List[str] = []
+
+    if not settings.groq_api_key and not settings.gemini_api_key:
+        problems.append(
+            "AI organization has no LLM provider: set GROQ_API_KEY (primary) "
+            "and/or GEMINI_API_KEY (fallback)."
+        )
+
+    if not settings.assemblyai_api_key:
+        # Required at the Settings level already (no default), so this is
+        # unreachable in practice -- kept as an explicit assertion because
+        # transcription has no second mandatory provider to fall back to.
+        problems.append("Transcription has no STT provider: set ASSEMBLYAI_API_KEY.")
+
+    if problems:
+        raise RuntimeError(
+            "Refusing to start with an unusable AI provider chain:\n  - "
+            + "\n  - ".join(problems)
+        )
+
+
+validate_ai_provider_chain()
+
+
+def database_url_for_psycopg() -> str:
+    """
+    The configured Postgres URL in a form `psycopg.connect()` accepts.
+
+    WHY THIS IS NEEDED
+
+    `DATABASE_URL` carries a SQLAlchemy dialect prefix (`postgresql+psycopg://`)
+    because Alembic requires one -- it is how SQLAlchemy knows which driver to
+    load. `psycopg` has no concept of that syntax and rejects it outright:
+
+        invalid connection option "postgresql+psycopg://..."
+
+    Passing the configured value straight to `psycopg` therefore fails always,
+    not intermittently. That made `/health/ready` return 503 on every
+    environment, which is worse than not having the endpoint: it is a deploy
+    gate, and a gate that is always red is a gate people learn to ignore.
+
+    Kept next to `Settings` because it is a config-shape concern, not a database
+    one, and because the alternative -- each caller remembering to strip the
+    prefix -- is exactly the kind of omission that ships.
+    """
+    url = settings.database_url
+    for prefix in ("postgresql+psycopg2://", "postgresql+psycopg://"):
+        if url.startswith(prefix):
+            return "postgresql://" + url[len(prefix):]
+    return url
+
+
+def validate_browser_delivery_settings() -> None:
+    """
+    Refuses to boot on cookie/CORS combinations that browsers silently reject.
+
+    Both failure modes here are silent. Nothing errors, no request 500s, and
+    every single authenticated call returns 401. They are also specific to the
+    deployment shape this project is moving to: a Vercel-hosted frontend on one
+    domain calling an AWS-hosted backend on another.
+
+        SameSite=None without Secure
+            Browsers discard the cookie outright. Login appears to succeed, then
+            every subsequent request is unauthenticated. Setting COOKIE_SAMESITE=none
+            without also setting COOKIE_SECURE=true is the exact mistake that turns
+            a cross-domain deploy into an app nobody can log into.
+
+        CORS_ORIGINS=* with credentials
+            main.py sets allow_credentials=True because auth is an httpOnly cookie.
+            A wildcard origin is illegal for credentialed requests, so the browser
+            refuses the response. Same symptom, different cause.
+
+    Cheap to check at boot. Expensive to diagnose from production logs.
+    """
+    problems: List[str] = []
+
+    if settings.cookie_samesite == "none" and not settings.cookie_secure:
+        problems.append(
+            "COOKIE_SAMESITE=none requires COOKIE_SECURE=true. Browsers silently "
+            "discard a SameSite=None cookie that is not Secure, which logs every "
+            "user out immediately and presents as a backend bug."
+        )
+
+    if settings.cookie_samesite not in ("lax", "strict", "none"):
+        problems.append(
+            f"COOKIE_SAMESITE={settings.cookie_samesite!r} is not one of lax, strict, none."
+        )
+
+    if "*" in settings.cors_origins:
+        problems.append(
+            "CORS_ORIGINS must list explicit origins, not '*'. Authentication is "
+            "a credentialed httpOnly cookie, and browsers reject credentialed "
+            "responses that carry a wildcard origin."
+        )
+
+    if not settings.cors_origins:
+        problems.append("CORS_ORIGINS is empty, so no browser origin can call this API.")
+
+    if problems:
+        raise RuntimeError(
+            "Refusing to start with unusable browser-delivery settings:\n  - "
+            + "\n  - ".join(problems)
+        )
+
+
+validate_browser_delivery_settings()
 
 # Storage tiers for media asset lifecycle management
 STORAGE_TIER_HOT = "hot"

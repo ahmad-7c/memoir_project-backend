@@ -1,0 +1,158 @@
+{
+  "family": "memoir-backend",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "1024",
+  "memory": "2048",
+  "executionRoleArn": "arn:aws:iam::ACCOUNT_ID:role/memoir-backend-execution",
+  "taskRoleArn": "arn:aws:iam::ACCOUNT_ID:role/memoir-backend-task",
+  "runtimePlatform": {
+    "cpuArchitecture": "X86_64",
+    "operatingSystemFamily": "LINUX"
+  },
+  "containerDefinitions": [
+    {
+      "name": "api",
+      "image": "ACCOUNT_ID.dkr.ecr.REGION.amazonaws.com/memoir-backend:latest",
+      "essential": true,
+      "portMappings": [
+        {
+          "containerPort": 8000,
+          "protocol": "tcp"
+        }
+      ],
+      "environment": [
+        {
+          "name": "WEB_CONCURRENCY",
+          "value": "2"
+        },
+        {
+          "name": "PORT",
+          "value": "8000"
+        },
+        {
+          "name": "PYTHONUNBUFFERED",
+          "value": "1"
+        },
+        {
+          "name": "COOKIE_SECURE",
+          "value": "true"
+        },
+        {
+          "name": "COOKIE_SAMESITE",
+          "value": "none"
+        },
+        {
+          "name": "CORS_ORIGINS",
+          "value": "https://your-vercel-domain.vercel.app"
+        },
+        {
+          "name": "SHARE_LINK_BASE_URL",
+          "value": "https://your-vercel-domain.vercel.app/share"
+        },
+        {
+          "name": "SUPABASE_BUCKET_NAME",
+          "value": "media"
+        },
+        {
+          "name": "MEDIA_MAX_BYTES",
+          "value": "52428800"
+        },
+        {
+          "name": "MEDIA_SIGNED_URL_TTL",
+          "value": "300"
+        },
+        {
+          "name": "GROQ_ORGANIZE_MODEL",
+          "value": "openai/gpt-oss-120b"
+        },
+        {
+          "name": "GEMINI_MODEL",
+          "value": "gemini-3.6-flash"
+        },
+        {
+          "name": "DEEPGRAM_MODEL",
+          "value": "nova-3"
+        },
+        {
+          "name": "AI_REQUEST_TIMEOUT_SECONDS",
+          "value": "30"
+        },
+        {
+          "name": "AI_MAX_ATTEMPTS_PER_PROVIDER",
+          "value": "2"
+        },
+        {
+          "name": "AI_MAX_CONCURRENCY",
+          "value": "4"
+        },
+        {
+          "name": "AI_CIRCUIT_FAILURE_THRESHOLD",
+          "value": "3"
+        },
+        {
+          "name": "AI_CIRCUIT_COOLDOWN_SECONDS",
+          "value": "60"
+        },
+        {
+          "name": "ORGANIZE_PIPELINE_DEADLINE_SECONDS",
+          "value": "180"
+        }
+      ],
+      "secrets": [
+        {
+          "name": "SUPABASE_URL",
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:memoir/supabase-url"
+        },
+        {
+          "name": "SUPABASE_ANON_KEY",
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:memoir/supabase-anon-key"
+        },
+        {
+          "name": "SUPABASE_SERVICE_ROLE_KEY",
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:memoir/supabase-service-role-key"
+        },
+        {
+          "name": "DATABASE_URL",
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:memoir/database-url"
+        },
+        {
+          "name": "SUPABASE_JWKS_URL",
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:memoir/supabase-jwks-url"
+        },
+        {
+          "name": "READER_JWT_SECRET",
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:memoir/reader-jwt-secret"
+        },
+        {
+          "name": "ASSEMBLYAI_API_KEY",
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:memoir/assemblyai-api-key"
+        },
+        {
+          "name": "GROQ_API_KEY",
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:memoir/groq-api-key"
+        },
+        {
+          "name": "GEMINI_API_KEY",
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:memoir/gemini-api-key"
+        },
+        {
+          "name": "DEEPGRAM_API_KEY",
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:memoir/deepgram-api-key"
+        }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/memoir-backend",
+          "awslogs-region": "REGION",
+          "awslogs-stream-prefix": "api",
+          "awslogs-create-group": "true",
+          "mode": "non-blocking",
+          "max-buffer-size": "1m"
+        }
+      },
+      "stopTimeout": 45
+    }
+  ]
+}

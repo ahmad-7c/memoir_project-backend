@@ -65,15 +65,20 @@ class MediaService:
         try:
             upload_res = storage_adapter.create_signed_upload(storage_path)
         except Exception as e:
-            # 🔍 ADD THIS PRINT STATEMENT TO SEE THE REAL ERROR IN YOUR TERMINAL
-            import traceback
-            traceback.print_exc()
-            print(f"STORAGE ERROR DETAILED: {repr(e)}")
-            
+            # Logged with the exception type and full traceback, not the message.
+            # Storage backends routinely echo signed URLs into their error text,
+            # and a signed URL is a bearer credential — logging it puts a live
+            # upload grant in the log aggregator. The operator still gets the
+            # traceback they need to debug this.
+            logger.exception("failed to create signed upload for memoir_id=%s", memoir_id)
+
+            # The upstream message is not echoed to the client: it is an
+            # infrastructure error, and 5xx detail strings should not describe
+            # our internal storage topology to whoever triggered it.
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to generate signed upload URL: {str(e)}"
-            )
+                detail="Failed to generate signed upload URL."
+            ) from e
 
         return {
             "storage_key": upload_res.path,
