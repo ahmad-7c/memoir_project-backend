@@ -4,9 +4,9 @@
 using Pydantic BaseSettings.
 """
 
-from typing import List, Optional
+from typing import Annotated, List, Optional
 from pydantic import Field, field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
 class Settings(BaseSettings):
@@ -95,8 +95,31 @@ class Settings(BaseSettings):
     # this is a bug or a pathological memoir, not a slow success.
     organize_pipeline_deadline_seconds: int = Field(180, validation_alias="ORGANIZE_PIPELINE_DEADLINE_SECONDS")
 
-    # FIXED: Added cors_origins so main.py can dynamically read allowed origins from the environment
-    cors_origins: List[str] = Field(
+    # FIXED: Added cors_origins so main.py can dynamically read allowed origins
+    # from the environment.
+    #
+    # `NoDecode` is load-bearing, not decoration. pydantic-settings treats a
+    # `List[str]` environment variable as JSON and JSON-parses it *before* the
+    # field validator below ever runs, so the documented comma-separated form
+    #
+    #     CORS_ORIGINS=https://a.example,https://b.example
+    #
+    # raises `SettingsError: error parsing value for field "cors_origins"` and
+    # the process refuses to boot. The only value that worked was a literal JSON
+    # array, which nobody would guess from the docs.
+    #
+    # This went unnoticed because local development never set the variable: the
+    # default list applied and the parsing path was never exercised. It surfaced
+    # the first time the value came from a real environment -- which in
+    # production is a deploy, not a `npm run dev`.
+    #
+    # `NoDecode` tells pydantic-settings to hand the raw string to the validator
+    # instead, so the comma-separated form documented here is the form that
+    # works. A JSON array still parses, because the validator accepts one.
+    cors_origins: Annotated[
+        List[str],
+        NoDecode,
+    ] = Field(
         default=["http://localhost:3000", "http://127.0.0.1:3000"],
         validation_alias="CORS_ORIGINS"
     )
@@ -114,13 +137,35 @@ class Settings(BaseSettings):
     @classmethod
     def assemble_cors_origins(cls, v: str | List[str]) -> List[str]:
         """
-        Parses comma-separated CORS origins string from environment variables into a list,
-        or accepts an existing list.
+        Accepts a comma-separated string, a literal JSON array, or a real list.
+
+        The comma form is what the deployment docs and `.env.production.example`
+        tell operators to write, and it is what a human produces under time
+        pressure. The JSON form is what pydantic-settings would otherwise have
+        demanded. Both work, so neither audience is punished.
+
+        Entries are stripped and empties dropped: a trailing comma in
+        `CORS_ORIGINS=https://a.example,` would otherwise produce an empty origin
+        that matches nothing while still looking configured.
         """
-        if isinstance(v, str) and not v.startswith("["):
-            return [i.strip() for i in v.split(",")]
-        elif isinstance(v, list):
-            return v
+        if isinstance(v, str):
+            text = v.strip()
+            if not text:
+                return []
+            if text.startswith("["):
+                import json
+
+                try:
+                    parsed = json.loads(text)
+                except json.JSONDecodeError:
+                    # Not JSON after all -- fall through to comma splitting
+                    # rather than refusing to boot over a stray bracket.
+                    parsed = None
+                if isinstance(parsed, list):
+                    return [str(o).strip() for o in parsed if str(o).strip()]
+            return [origin.strip() for origin in text.split(",") if origin.strip()]
+        if isinstance(v, list):
+            return [str(origin).strip() for origin in v if str(origin).strip()]
         return ["http://localhost:3000"]
 
     @field_validator("cookie_samesite")

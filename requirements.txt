@@ -2,6 +2,26 @@ fastapi==0.141.1
 pydantic==2.13.4
 pydantic_settings==2.15.0
 python-dotenv==1.2.3
+
+# Transcribed over plain HTTPS by src/integrations/stt/router.py, so it is a
+# direct dependency and not merely an implementation detail of the SDKs below.
+#
+# It was previously present only because `supabase` and `openai` happen to depend
+# on it. Declaring it removes the dependency on that coincidence: neither of
+# those packages is obliged to keep it, and a version bump that drops it would
+# break transcription in every deployed environment at once.
+httpx==0.28.1
+
+# Required by `EmailStr` in src/schemas/auth.py. Pydantic raises
+# ImportError("email-validator is not installed") at import time without it, and
+# nothing declares it as a transitive dependency -- `pip show email-validator`
+# reports Required-by as empty.
+#
+# It is listed here because the developer's virtualenv happened to contain it,
+# which hid the omission entirely: a fresh install from this file could not boot
+# the application. That surfaced for the first time inside the container image,
+# where every dependency comes from this list and nothing else.
+email-validator==2.3.0
 SQLAlchemy==2.0.52
 supabase==2.12.0
 psycopg2-binary==2.9.12

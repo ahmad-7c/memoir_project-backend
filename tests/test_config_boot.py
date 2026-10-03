@@ -317,3 +317,116 @@ def test_readiness_reports_503_with_a_generic_message(client):
         assert "password" not in body.lower()
     finally:
         cfg.settings.database_url = original
+
+# ---------------------------------------------------------------------------
+# CORS origins: the format that only fails in production
+# ---------------------------------------------------------------------------
+
+
+def _cors_origins_from(value: str):
+    """Builds Settings from a CORS_ORIGINS value, in a subprocess with no .env."""
+    import os
+    import subprocess
+    import sys
+
+    code = (
+        "import os, sys; sys.path.insert(0, '.')\n"
+        "from src.core.config import Settings\n"
+        "print(repr(Settings().cors_origins))\n"
+    )
+    env = {
+        **os.environ,
+        "SUPABASE_URL": "http://127.0.0.1:54321",
+        # JWT-shaped: create_client validates the key at import time.
+        "SUPABASE_ANON_KEY": "eyJhbGciOiJub25lIn0.eyJyb2xlIjoiYW5vbiJ9.sig",
+        "SUPABASE_SERVICE_ROLE_KEY": "eyJhbGciOiJub25lIn0.eyJyb2xlIjoic2VydmljZV9yb2xlIn0.sig",
+        "DATABASE_URL": "postgresql://postgres:postgres@127.0.0.1:54322/postgres",
+        "SUPABASE_JWKS_URL": "http://127.0.0.1:54321/auth/v1/.well-known/jwks.json",
+        "READER_JWT_SECRET": "x" * 20,
+        "ASSEMBLYAI_API_KEY": "x",
+        "GEMINI_API_KEY": "x",
+        "CORS_ORIGINS": value,
+    }
+    result = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, env=env
+    )
+    assert result.returncode == 0, f"CORS_ORIGINS={value!r} refused to boot:\n{result.stderr[-600:]}"
+    return eval(result.stdout.strip())
+
+
+def test_comma_separated_cors_origins_boots():
+    """
+    The format the deployment docs and `.env.production.example` tell operators
+    to write.
+
+    `cors_origins: List[str]` makes pydantic-settings JSON-decode the variable
+    *before* the field validator runs, so this raised
+
+        SettingsError: error parsing value for field "cors_origins"
+
+    and the process refused to boot. `NoDecode` on the field routes the raw
+    string to the validator instead.
+
+    It went unnoticed because local development never set the variable: the
+    default list applied and the parsing path was never exercised. The first
+    real deployment is what reaches it.
+    """
+    assert _cors_origins_from("http://localhost:3000,http://127.0.0.1:3000") == [
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+    ]
+
+
+def test_a_json_array_still_parses():
+    """Backwards compatibility: pydantic-settings' native form must keep working."""
+    assert _cors_origins_from('["https://a.example", "https://b.example"]') == [
+        "https://a.example",
+        "https://b.example",
+    ]
+
+
+def test_a_single_origin_needs_no_comma():
+    assert _cors_origins_from("https://only.example") == ["https://only.example"]
+
+
+def test_surrounding_whitespace_and_trailing_commas_are_dropped():
+    """
+    A trailing comma must not produce an empty origin. An empty string in
+    `allow_origins` matches nothing, so it looks configured while permitting no
+    browser at all -- which reads as a mysterious 401 rather than a config error.
+    """
+    assert _cors_origins_from(" https://a.example , https://b.example ,") == [
+        "https://a.example",
+        "https://b.example",
+    ]
+
+
+def test_an_empty_cors_origins_refuses_to_boot():
+    """
+    No listed origin means no browser can call this API, which is never a
+    deployment anyone intends. Failing at boot beats a silently unusable service.
+    """
+    import os
+    import subprocess
+    import sys
+
+    code = (
+        "import sys; sys.path.insert(0, '.')\n"
+        "from src.core.config import Settings; Settings()\n"
+    )
+    env = {
+        **os.environ,
+        "SUPABASE_URL": "http://127.0.0.1:54321",
+        "SUPABASE_ANON_KEY": "eyJhbGciOiJub25lIn0.eyJyb2xlIjoiYW5vbiJ9.sig",
+        "SUPABASE_SERVICE_ROLE_KEY": "eyJhbGciOiJub25lIn0.eyJyb2xlIjoic2VydmljZV9yb2xlIn0.sig",
+        "DATABASE_URL": "postgresql://postgres:postgres@127.0.0.1:54322/postgres",
+        "SUPABASE_JWKS_URL": "http://127.0.0.1:54321/auth/v1/.well-known/jwks.json",
+        "READER_JWT_SECRET": "x" * 20,
+        "ASSEMBLYAI_API_KEY": "x",
+        "GEMINI_API_KEY": "x",
+        "CORS_ORIGINS": "",
+    }
+    result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env=env)
+
+    assert result.returncode != 0
+    assert "CORS_ORIGINS" in result.stderr
