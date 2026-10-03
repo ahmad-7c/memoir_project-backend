@@ -5,6 +5,8 @@ date timeline normalization, media asset linking, feed retrieval, and lifecycle 
 fully decoupled from direct database infrastructure calls.
 """
 
+import logging
+
 from fastapi import HTTPException, status
 from src.schemas.memory import MemoryCreateRequest
 from src.integrations import memory_repository, participant_repository
@@ -12,6 +14,8 @@ from src.domain.authorization import verify_active_participant, assert_memoir_ed
 from src.integrations import storage_adapter
 from src.domain.transcription_service import enqueue_transcription, compute_effective_transcription_status
 from src.integrations.supabase_client import supabase  # <-- Required for querying transcript table directly if needed
+
+logger = logging.getLogger(__name__)
 
 class MemoryService:
     """
@@ -65,8 +69,12 @@ class MemoryService:
 
         # Associate attached media assets via the junction table with ownership verification
         if payload.media_asset_ids:
-            print(f"DEBUG: Found media_asset_ids in payload: {payload.media_asset_ids}")
-            
+            # Counted, never listed. The previous version printed the full list of
+            # asset ids to stdout on every attach, which puts internal storage
+            # identifiers into process logs that are typically shipped somewhere
+            # with wider access than the database.
+            logger.debug("attaching %d media asset(s)", len(payload.media_asset_ids))
+
             owned_assets = memory_repository.verify_media_assets_belong_to_memoir(
                 payload.memoir_id, payload.media_asset_ids
             )

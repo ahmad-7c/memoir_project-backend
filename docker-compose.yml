@@ -1,0 +1,94 @@
+# Memoir backend -- ECS Fargate / App Runner / EC2 / plain Docker.
+#
+# This file is the portable form of the deployment. The ECS task definition in
+# deploy/ is the same image with the same command and the same environment; the
+# compose file is here so the container can be built and smoke-tested on any
+# machine before it goes anywhere near AWS.
+#
+#   docker compose build
+#   docker compose up api                 # serve
+#   docker compose run --rm migrate       # guarded migration, explicit step
+#   docker compose run --rm migrate-check # report only, non-zero if behind
+#
+# ---------------------------------------------------------------------------
+# MIGRATION IS A SEPARATE SERVICE ON PURPOSE.
+#
+# `api` has no migrate step in its command. Three revisions in the chain are not
+# idempotent -- cd3760273110 drops and re-adds the organization_status columns --
+# so an automatic upgrade on boot converts an unexpected alembic_version into
+# silent data loss, at the exact moment you are trying to recover from something
+# else. Run `migrate` deliberately, read what it prints, then deploy the new image.
+# ---------------------------------------------------------------------------
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: memoir-backend:latest
+    env_file:
+      - .env.production
+    environment:
+      # uvicorn worker count. Each worker has its own event loop and threadpool,
+      # which is what scales organize-pipeline capacity. The chat rate limiter is
+      # in-process and therefore per-worker -- raising this does not raise the
+      # aggregate limit.
+      WEB_CONCURRENCY: "2"
+      PORT: "8000"
+    ports:
+      # Bound to loopback: the ALB is the only thing that should reach this. If
+      # you are testing from another host, forward a port explicitly rather than
+      # publishing 0.0.0.0 and relying on a security group you have not verified.
+      - "127.0.0.1:8000:8000"
+    restart: unless-stopped
+    healthcheck:
+      test:
+        - "CMD"
+        - "python"
+        - "-c"
+        - "import sys,urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3).status == 200 else 1)"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      # Long enough for the interpreter to import the app and for
+      # validate_ai_provider_chain() to fail fast if a secret is missing.
+      # A container that fails here should NOT be restarted into a loop.
+      start_period: 20s
+    # Give an in-flight organize pipeline a chance to finish. Raising SIGTERM
+    # mid-pipeline leaves the run row in `running`, which the read path presents
+    # as `stalled` -- correct, but an avoidable confusing state. 45s matches the
+    # ECS `stopTimeout` in deploy/.
+    stop_grace_period: 45s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: memoir-backend:latest
+    env_file:
+      - .env.production
+    # The guarded runner: reads alembic_version, refuses from any revision it
+    # cannot prove is safe to advance, and otherwise runs `alembic upgrade head`.
+    # `restart: "no"` because a one-shot job must not be rescheduled -- a
+    # migration that failed needs a human, not another attempt.
+    command: ["python", "scripts/migrate.py"]
+    restart: "no"
+
+  migrate-check:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: memoir-backend:latest
+    env_file:
+      - .env.production
+    # Read-only: reports the current revision and exits non-zero if it is not
+    # head. Use this as a deploy gate so a new image is never promoted against a
+    # database the migration has not reached.
+    command: ["python", "scripts/migrate.py", "--check"]
+    restart: "no"
+    profiles: ["check"]

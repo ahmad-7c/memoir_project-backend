@@ -6,12 +6,24 @@ SQLAlchemy==2.0.52
 supabase==2.12.0
 psycopg2-binary==2.9.12
 uvicorn[standard]==0.30.0
-celery
 PyJWT==2.10.1
 passlib==1.7.4
 bcrypt==4.0.1
 alembic==1.14.0
 psycopg[binary]==3.2.10
+
+# LLM providers. The openai SDK speaks both providers' OpenAI-compatible APIs
+# (Groq and Gemini), so one dependency covers the whole chain. Groq is the
+# primary for AI organization; Gemini is the fallback.
 openai==1.109.1
+
+# STT providers. AssemblyAI is primary, Deepgram is the fallback (see
+# src/integrations/stt/router.py for why not Whisper). Deepgram is called over
+# plain HTTPS via httpx, which arrives transitively with the supabase client.
 assemblyai==1.5.5
+
 xhtml2pdf==0.2.20
+
+# NOTE: celery was previously listed here but is unused -- background jobs run
+# on FastAPI BackgroundTasks by deliberate decision (commit c100a07). It was
+# removed rather than left as a misleading entry.

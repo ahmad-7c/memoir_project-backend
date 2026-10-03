@@ -1,0 +1,64 @@
+# Keep the build context small and, more importantly, keep secrets out of it.
+# Anything not listed here is sent to the Docker daemon as build context, and
+# every COPY of it becomes a layer in a registry anyone with pull access can read.
+
+# --- Secrets. The most important entry in this file. ---
+.env
+.env.*
+!.env.example
+!.env.production.example
+*.pem
+*.key
+secrets/
+secrets.*.json
+
+# --- VCS and IDE ---
+.git
+.gitignore
+.github
+.vscode
+.idea
+*.swp
+
+# --- Virtualenvs and Python build artifacts ---
+venv/
+.venv/
+env/
+ENV/
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# --- Test and verification scaffolding. Not needed to serve traffic. ---
+tests/
+_ddl_parity_check.py
+_import_check.py
+pytest.ini
+conftest.py
+htmlcov/
+
+# --- Documentation and deployment notes ---
+*.md
+!README.md
+deploy/
+docs/
+ENGINEERING.md
+AUDIT_FINDINGS.md
+AGENTS.md
+
+# --- Frontend, if the build context is the repository root ---
+frontend/
+node_modules/
+
+# --- OS noise ---
+.DS_Store
+Thumbs.db
