@@ -26,15 +26,25 @@ services:
       context: .
       dockerfile: Dockerfile
     image: memoir-backend:latest
+    # The developer's own `.env`. Same values the app already runs with locally,
+    # so a compose container talks to the same Supabase project as `npm run dev`.
+    #
+    # NOT `.env.production`. That file is for ECS, where the frontend is on a
+    # different domain and the cookie must be `SameSite=None; Secure`. Running
+    # those values over http://127.0.0.1 makes the browser discard the session
+    # cookie, so every request 401s and the container looks broken for a reason
+    # that has nothing to do with the container.
     env_file:
-      - .env.production
+      - .env
     environment:
-      # uvicorn worker count. Each worker has its own event loop and threadpool,
-      # which is what scales organize-pipeline capacity. The chat rate limiter is
-      # in-process and therefore per-worker -- raising this does not raise the
-      # aggregate limit.
       WEB_CONCURRENCY: "2"
       PORT: "8000"
+      # Local overrides. Overriding rather than relying on `.env` values means
+      # the developer's real production cookie settings do not leak into a local
+      # run, and the container is correct even if `.env` says otherwise.
+      COOKIE_SECURE: "false"
+      COOKIE_SAMESITE: "lax"
+      CORS_ORIGINS: "http://localhost:3000,http://127.0.0.1:3000"
     ports:
       # Bound to loopback: the ALB is the only thing that should reach this. If
       # you are testing from another host, forward a port explicitly rather than
@@ -70,12 +80,12 @@ services:
       context: .
       dockerfile: Dockerfile
     image: memoir-backend:latest
-    env_file:
-      - .env.production
     # The guarded runner: reads alembic_version, refuses from any revision it
     # cannot prove is safe to advance, and otherwise runs `alembic upgrade head`.
     # `restart: "no"` because a one-shot job must not be rescheduled -- a
     # migration that failed needs a human, not another attempt.
+    env_file:
+      - .env
     command: ["python", "scripts/migrate.py"]
     restart: "no"
 
@@ -84,11 +94,11 @@ services:
       context: .
       dockerfile: Dockerfile
     image: memoir-backend:latest
-    env_file:
-      - .env.production
     # Read-only: reports the current revision and exits non-zero if it is not
     # head. Use this as a deploy gate so a new image is never promoted against a
     # database the migration has not reached.
+    env_file:
+      - .env
     command: ["python", "scripts/migrate.py", "--check"]
     restart: "no"
     profiles: ["check"]

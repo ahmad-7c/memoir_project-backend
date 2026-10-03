@@ -1,5 +1,3 @@
-# syntax=docker/dockerfile:1
-#
 # Memoir backend image.
 #
 # Two-stage build: dependencies are compiled and installed into a self-contained
@@ -26,6 +24,15 @@
 # which reads alembic_version first and refuses from any revision it cannot
 # prove is safe to advance. See deploy/README.md.
 # ---------------------------------------------------------------------------
+
+# No `# syntax=` directive.
+#
+# It is the first thing most Dockerfiles put there, and it is not free: it makes
+# BuildKit fetch `docker/dockerfile:1` from Docker Hub before it can read this
+# file. On a locked-down or high-latency network that fetch times out and the
+# build fails with a TLS handshake error against a registry, which sends people
+# looking at registry credentials rather than at a one-line directive. Nothing
+# here uses a BuildKit-only instruction, so the built-in parser is enough.
 
 # ---------------------------------------------------------------------------
 # Builder
