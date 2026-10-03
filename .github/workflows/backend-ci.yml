@@ -207,7 +207,10 @@ jobs:
       - uses: docker/setup-buildx-action@v3
 
       - name: Build
-        working-directory: backend
+        # No `working-directory` here. That key is only valid on a `run:` step --
+        # GitHub's schema rejects it on a `uses:` step, and the resulting error
+        # ("Required property is missing: run") points at the wrong line entirely.
+        # `context` below is how a `uses:` step selects its directory.
         uses: docker/build-push-action@v6
         with:
           context: backend

@@ -365,3 +365,115 @@ def test_the_one_pending_proposal_index_is_partial_and_unique():
         "index on memoir_id would also forbid a second APPLIED proposal, so the "
         "apply history would stop after one organize run"
     )
+
+# ---------------------------------------------------------------------------
+# CI workflow validity
+# ---------------------------------------------------------------------------
+
+WORKFLOW = BACKEND_ROOT / ".github" / "workflows" / "backend-ci.yml"
+
+
+def _load_workflow():
+    import yaml
+
+    return yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+
+
+def test_the_ci_workflow_is_valid_yaml():
+    """
+    Catches the class of mistake that makes GitHub Actions reject a workflow
+    outright: nothing runs, and the failure is reported by the platform rather
+    than by anything in the repository.
+
+    Worth its own test because the workflow is the one file whose breakage is
+    invisible until it is pushed -- at which point every job is already red.
+    """
+    workflow = _load_workflow()
+
+    assert "jobs" in workflow
+    for name, job in workflow["jobs"].items():
+        assert "runs-on" in job, f"job {name!r} has no runs-on"
+        assert job.get("steps"), f"job {name!r} has no steps"
+
+
+def test_every_ci_step_declares_exactly_one_of_run_or_uses():
+    """
+    A step must have `run` OR `uses`, never both and never neither.
+
+    GitHub's error for neither is actively misleading: it reports
+    "Required property is missing: run" on the step's `name` line, several lines
+    above the actual cause. This is how a `working-directory` key -- which is
+    only valid alongside `run` -- ended up pointing the blame at the wrong line
+    of the wrong step.
+    """
+    workflow = _load_workflow()
+    problems = []
+
+    for job_name, job in workflow["jobs"].items():
+        for index, step in enumerate(job.get("steps") or []):
+            if not isinstance(step, dict):
+                problems.append(f"{job_name}[{index}]: step is not a mapping")
+                continue
+
+            has_run = "run" in step
+            has_uses = "uses" in step
+
+            if has_run and has_uses:
+                problems.append(f"{job_name}[{index}]: has both run and uses")
+            elif not has_run and not has_uses:
+                problems.append(f"{job_name}[{index}]: has neither run nor uses")
+
+            # `working-directory` is only meaningful for a `run:` step. On a
+            # `uses:` step it is not merely ignored -- it makes the workflow
+            # file invalid, and Actions refuses the whole file.
+            if "working-directory" in step and not has_run:
+                problems.append(
+                    f"{job_name}[{index}]: working-directory on a uses: step "
+                    f"({step.get('uses')})"
+                )
+
+    assert not problems, "invalid workflow steps:\n  " + "\n  ".join(problems)
+
+
+def test_no_ci_step_references_a_production_secret():
+    """
+    The `database-invariants` job runs against a throwaway Postgres service, not
+    Supabase, so it needs no credentials and the workflow must stay
+    runnable-with-no-secrets.
+
+    Checked for secret *references* -- `${{ secrets.* }}` and ECS `valueFrom` --
+    and not for secret *names*. A literal placeholder is required, not a problem:
+    `conftest.py` installs one, and `src.core.config` refuses to import without
+    some value there. The distinction matters, because a test that flagged the
+    name would fail on the very step that makes the suite hermetic.
+
+    An `aws-actions/*` step is exempt: it authenticates by OIDC and stores no
+    long-lived key, which is the correct arrangement and worth not breaking.
+    """
+    workflow = _load_workflow()
+    problems = []
+
+    for job_name, job in workflow["jobs"].items():
+        for step in job.get("steps") or []:
+            if not isinstance(step, dict):
+                continue
+            if step.get("uses", "").startswith("aws-actions/"):
+                continue
+
+            rendered = yaml_safe_dump(step)
+            if "secrets." in rendered:
+                problems.append(f"{job_name}: references a repository secret")
+            for value in (step.get("env") or {}).values():
+                if isinstance(value, str) and value.startswith("arn:aws:secretsmanager"):
+                    problems.append(f"{job_name}: pulls a value from Secrets Manager")
+
+    assert not problems, (
+        "CI must run without production credentials:\n  " + "\n  ".join(problems)
+    )
+
+
+def yaml_safe_dump(node) -> str:
+    """Serialises a workflow fragment so secret references can be searched for."""
+    import yaml
+
+    return yaml.safe_dump(node)
