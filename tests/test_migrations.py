@@ -477,3 +477,79 @@ def yaml_safe_dump(node) -> str:
     import yaml
 
     return yaml.safe_dump(node)
+
+
+def test_every_repo_relative_path_in_the_ci_workflow_exists():
+    """
+    Catches the mistake that broke this workflow twice before it ran a job.
+
+    Every path in a GitHub Actions workflow is relative to the repository root,
+    and this repository's root *is* the backend -- there is no `backend/`
+    directory inside it. Writing `backend/requirements.txt` therefore resolves to
+    nothing, and the workflow dies at its second step with an error about a
+    missing file, which reads like a checkout problem rather than a path
+    mistake.
+
+    A path that does not exist is only discoverable by running the workflow,
+    which means by pushing it, which means every job is already red. So the
+    paths are checked here instead.
+
+    Files a step *produces* (coverage, JUnit XML) are exempt -- they are absent
+    by definition until the step runs, and requiring them would fail on a clean
+    tree.
+    """
+    import re
+
+    text = WORKFLOW.read_text(encoding="utf-8")
+
+    referenced: set = set()
+    referenced |= set(re.findall(r"cache-dependency-path:\s*(\S+)", text))
+    referenced |= set(re.findall(r"migrations/[\w./-]+\.sql", text))
+    referenced.add("requirements.txt")
+
+    # Strip comments before scanning for build context: prose mentions
+    # `context: .` in a sentence, and a regex cannot tell that from a real line.
+    uncommented = "\n".join(
+        line.split("#", 1)[0] for line in text.splitlines()
+    )
+    for value in re.findall(r"context:\s*(\S+)", uncommented):
+        referenced.add(value)
+
+    missing = []
+    for path in sorted(referenced):
+        if path in (".", "./"):
+            continue
+        if not (BACKEND_ROOT / path).exists():
+            missing.append(path)
+
+    assert not missing, (
+        f"the CI workflow references paths that do not exist in this "
+        f"repository: {missing}. The repository root is the backend, so there "
+        f"is no 'backend/' prefix -- that is what broke this workflow."
+    )
+
+
+def test_the_workflow_artifact_paths_are_repo_relative():
+    """
+    Artifact upload paths get the same treatment for the same reason, and
+    separately because a wrong one produces a silent failure: `upload-artifact`
+    defaults to `if-no-files-found: warn`, so a bad path gives a yellow warning
+    in a passing run rather than a red one. Nobody reads it, and the report is
+    simply missing when someone needs it.
+    """
+    import re
+
+    text = WORKFLOW.read_text(encoding="utf-8")
+
+    for path in re.findall(r"^\s*path:\s*(\S+)", text, re.M):
+        assert not path.startswith("backend/"), (
+            f"artifact path {path!r} has a 'backend/' prefix; the repository "
+            "root is the backend"
+        )
+
+    # The reports these upload are worth having, so a missing file must be loud.
+    assert "if-no-files-found: warn" in text or "if-no-files-found: error" in text
+    assert text.count("if-no-files-found: error") >= 1, (
+        "a CI report that silently fails to upload is worse than none: the run "
+        "is green and the evidence is gone. Use if-no-files-found: error."
+    )
