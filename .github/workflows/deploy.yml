@@ -43,10 +43,9 @@ jobs:
           # Hub in the Dockerfile, a separate path this doesn't touch).
           python-version: "3.13"
           cache: "pip"
-          cache-dependency-path: backend/requirements.txt
+          cache-dependency-path: requirements.txt
 
       - name: Install dependencies
-        working-directory: backend
         run: pip install -r requirements.txt
 
       - name: Load environment (secrets -> process env, not a committed file)
@@ -54,7 +53,7 @@ jobs:
         # set (validate_ai_provider_chain / validate_browser_delivery_settings),
         # so the test suite needs them present even though most tests never
         # touch a network. One secret holding a full .env.production-shaped
-        # blob (see backend/.env.production.example) keeps this to one thing
+        # blob (see .env.production.example) keeps this to one thing
         # to maintain in GitHub instead of thirty.
         #
         # Comments and blank lines are stripped before appending to
@@ -64,7 +63,6 @@ jobs:
           echo "${{ secrets.ENV_PRODUCTION }}" | grep -v '^#' | grep -v '^[[:space:]]*$' >> "$GITHUB_ENV"
 
       - name: Run test suite
-        working-directory: backend
         run: python -m pytest tests/ -q
 
   migrate:
@@ -81,10 +79,9 @@ jobs:
         with:
           python-version: "3.13"
           cache: "pip"
-          cache-dependency-path: backend/requirements.txt
+          cache-dependency-path: requirements.txt
 
       - name: Install dependencies
-        working-directory: backend
         run: pip install -r requirements.txt
 
       - name: Load environment
@@ -92,7 +89,6 @@ jobs:
           echo "${{ secrets.ENV_PRODUCTION }}" | grep -v '^#' | grep -v '^[[:space:]]*$' >> "$GITHUB_ENV"
 
       - name: Guarded migration
-        working-directory: backend
         # Reads alembic_version first and only advances from a revision it can
         # prove is safe (see scripts/migrate.py's own docstring). Exits
         # non-zero -- failing this job, not silently continuing -- if the
@@ -126,12 +122,10 @@ jobs:
           chmod +x /usr/local/bin/lightsailctl
 
       - name: Build image
-        working-directory: backend
         run: docker build -t memoir-backend:${{ github.sha }} .
 
       - name: Push image to the Lightsail service's private registry
         id: push
-        working-directory: backend
         # This is NOT ECR -- Lightsail container services have their own
         # per-service image registry, and this command is the only way into
         # it. The CLI prints the real reference to use in a deployment
