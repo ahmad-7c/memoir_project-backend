@@ -27,8 +27,11 @@ class Settings(BaseSettings):
     # Deliberately NOT the Supabase JWKS/secret — readers never touch owner auth.
     reader_jwt_secret: str = Field(..., validation_alias="READER_JWT_SECRET")
 
+    # Matches the frontend's actual reader route (frontend/src/app/contribute/[token]) --
+    # there is no /share/[token] page, so a link built from the wrong base 404s the
+    # moment a relative opens it.
     share_link_base_url: str = Field(
-        "http://localhost:3000/share", validation_alias="SHARE_LINK_BASE_URL"
+        "http://localhost:3000/contribute", validation_alias="SHARE_LINK_BASE_URL"
     )
 
     # No default — a misconfigured deployment must fail to start, not boot

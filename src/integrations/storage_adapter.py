@@ -169,6 +169,42 @@ def create_playback_url(key: str, ttl_seconds: int | None = None) -> str | None:
         return None
 
 
+def create_playback_urls_batch(keys: list[str], ttl_seconds: int | None = None) -> dict[str, str]:
+    """
+    Signs many storage keys in ONE network call via storage3's
+    `create_signed_urls` (plural), instead of one HTTP round-trip per photo/
+    recording. A memoir page with 80 photos must not issue 80 signed-URL
+    calls just to render -- this is the storage-layer half of "a constant
+    number of queries regardless of how many memories exist."
+
+    Returns {key: signed_url}; a key whose signing failed is simply absent
+    (never raises) -- one bad key must not blank out every other photo on
+    the page.
+    """
+    if not keys:
+        return {}
+    deduped = list(dict.fromkeys(keys))
+    try:
+        res = _client.storage.from_(settings.supabase_media_bucket).create_signed_urls(
+            deduped, ttl_seconds if ttl_seconds is not None else settings.media_signed_url_ttl
+        )
+    except Exception as exc:
+        logger.warning("Batch playback URL signing failed for %d key(s): %s", len(deduped), exc)
+        return {}
+
+    # Matched by `item["path"]`, not positionally -- the response's own
+    # per-item `path` field is the only documented correspondence, and
+    # trusting request/response order here would be an easy latent bug if
+    # Supabase ever changes that (or doesn't guarantee it today).
+    urls: dict[str, str] = {}
+    for item in res or []:
+        path = item.get("path")
+        url = item.get("signedURL") or item.get("signedUrl")
+        if path and url and not item.get("error"):
+            urls[path] = url
+    return urls
+
+
 def remove_object(key: str) -> None:
     """
     Deletes an object permanently from the storage bucket. 

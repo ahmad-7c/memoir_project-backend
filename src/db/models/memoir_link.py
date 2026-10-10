@@ -22,6 +22,16 @@ class MemoirLink(Base):
         UUID(as_uuid=True), ForeignKey("memoir.id", ondelete="CASCADE"), nullable=False
     )
     scope: Mapped[str] = mapped_column(_enums.link_scope, nullable=False)
+    # Stored in PLAINTEXT, deliberately -- the owner must be able to re-copy
+    # the exact link months later (there is no "resend" flow), so a hash
+    # that can't be reversed back into the link isn't viable here. This is
+    # the one place in the product's auth model where a credential sits in
+    # the database unhashed, and it is compensated for rather than ignored:
+    # generated with secrets.token_urlsafe(32) (256 bits, cryptographically
+    # unpredictable, never sequential), fully revocable (revoked_at), and
+    # never written to any log line. A reader also needs the password
+    # (hashed, see password_hash below) to do anything with it, so this
+    # token alone is "where to knock", not "the key".
     token: Mapped[str] = mapped_column(Text, nullable=False)
     created_by_participant_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("memoir_participant.id", ondelete="SET NULL"), nullable=True

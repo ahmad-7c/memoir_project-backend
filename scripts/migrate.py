@@ -6,11 +6,14 @@ predecessors are not safe to re-run.
 
 WHY THIS EXISTS INSTEAD OF `alembic upgrade head` IN AN ENTRYPOINT
 
-Three revisions in the chain are not idempotent:
+Six revisions in the chain are not idempotent:
 
     879e2c8d1b8c  add memory_media foreign keys    -- ADD CONSTRAINT
     080151e0f1e8  (drop constraint)                 -- DROP CONSTRAINT
     cd3760273110  organization job status            -- DROP COLUMN + ADD COLUMN
+    a1c9e4f27b3d  profile + publish_memoir_tx()       -- ADD COLUMN
+    b7d2a93f4c1e  narrative sections                   -- ADD COLUMN
+    c4f8e1a9b2d7  share-link hardening                  -- ADD COLUMN
 
 If the database's `alembic_version` is at or before any of those, a blind
 `upgrade head` either fails on a duplicate object or — worse — drops
@@ -59,7 +62,7 @@ logger = logging.getLogger("migrate")
 # The set of revisions AHEAD of each entry is what matters. Advance one revision
 # at a time and read the chain:
 #
-#   cd3760273110 --[safe]--> d8ebd28b0d20 --[safe]--> c3f9a1b204d7 --> e7a41c5b9f32
+#   cd3760273110 --[safe]--> d8ebd28b0d20 --[safe]--> c3f9a1b204d7 --> e7a41c5b9f32 --[safe]--> a1c9e4f27b3d --[safe]--> b7d2a93f4c1e --[safe]--> c4f8e1a9b2d7
 #         ^
 #    SAFE_TO_ADVANCE_FROM
 #
@@ -68,19 +71,30 @@ logger = logging.getLogger("migrate")
 # ones keep pointing at the replaced function.
 #
 # `c3f9a1b204d7` and `e7a41c5b9f32` are pure CREATE TABLE / CREATE INDEX on
-# tables that do not yet exist. Nothing ahead of this set drops, alters or
-# re-adds a column, so no row is read, written or destroyed.
+# tables that do not yet exist, so from either of those, advancing is safe up
+# to (not including) `a1c9e4f27b3d`.
 #
-# Anything EARLIER is refused. Reaching it would re-run `879e2c8d1b8c`
-# (ADD CONSTRAINT) or `080151e0f1e8` (DROP CONSTRAINT), which fail on a
-# duplicate/missing object, or -- if the database sits behind it rather than
-# between revisions -- `cd3760273110`, which does DROP COLUMN + ADD COLUMN on
-# memoir.organization_status and would erase every organize run this project has
-# ever recorded. That failure is silent and has no rollback.
-SAFE_TO_ADVANCE_FROM = {"cd3760273110", "d8ebd28b0d20"}
+# `a1c9e4f27b3d`, `b7d2a93f4c1e` and `c4f8e1a9b2d7` each ADD columns only
+# (respectively: memoir.pdf_exportable/user_account.subscription_status plus
+# a CREATE OR REPLACE FUNCTION; memoir.narrative_reviewed_at plus three new
+# CREATE TABLEs; comment.narrative_section_id plus new triggers -- all
+# `drop trigger if exists` guarded, so re-running those specific statements
+# is also safe, unlike the column adds). Adding a column never destroys an
+# existing row -- it only fails loudly on a second run (duplicate column) --
+# and since a database sitting at any of these three revisions means the
+# next ADD COLUMN has never run yet, running it for the first time from
+# there is safe. All three are therefore in this set.
+#
+# Anything EARLIER than `cd3760273110` is refused. Reaching it would re-run
+# `879e2c8d1b8c` (ADD CONSTRAINT) or `080151e0f1e8` (DROP CONSTRAINT), which
+# fail on a duplicate/missing object, or -- if the database sits behind it
+# rather than between revisions -- `cd3760273110`, which does DROP COLUMN +
+# ADD COLUMN on memoir.organization_status and would erase every organize run
+# this project has ever recorded. That failure is silent and has no rollback.
+SAFE_TO_ADVANCE_FROM = {"cd3760273110", "d8ebd28b0d20", "e7a41c5b9f32", "a1c9e4f27b3d", "b7d2a93f4c1e"}
 
 # Nothing behind HEAD may be re-run, but HEAD itself needs no work.
-HEAD = "e7a41c5b9f32"
+HEAD = "c4f8e1a9b2d7"
 
 
 def read_current_revision(engine) -> str | None:

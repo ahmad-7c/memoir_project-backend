@@ -15,6 +15,13 @@ class ShareLinkUpdateRequest(BaseModel):
     clear_password: Optional[bool] = Field(
         None, description="If true, removes the password requirement (takes priority over `password`)."
     )
+    can_comment: Optional[bool] = Field(
+        None,
+        description=(
+            "Whether a reader who unlocked this link may comment. Writes "
+            "memoir.comment_policy under the hood (anyone_who_can_view / invited_only)."
+        ),
+    )
 
     @field_validator("password")
     @classmethod
@@ -32,6 +39,7 @@ class ShareLinkResponse(BaseModel):
     url: str
     visibility: ShareVisibility
     has_password: bool
+    can_comment: bool
     created_by_participant_id: Optional[str] = None
     created_at: datetime
     expires_at: Optional[datetime] = None
@@ -89,6 +97,7 @@ class SharedMediaAssetResponse(BaseModel):
     width_px: Optional[int] = None
     height_px: Optional[int] = None
     playback_url: Optional[str] = None
+    transcript_text: Optional[str] = None
 
 
 class SharedMemoryResponse(BaseModel):
@@ -99,8 +108,28 @@ class SharedMemoryResponse(BaseModel):
     occurred_start: Optional[date] = None
     occurred_end: Optional[date] = None
     occurred_precision: Optional[str] = None
+    chapter_id: Optional[str] = None
     created_at: datetime
     media: List[SharedMediaAssetResponse] = []
+
+
+class SharedChapterResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    title: str
+    summary: Optional[str] = None
+    sort_order: int
+
+
+class SharedNarrativeSectionResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    chapter_id: Optional[str] = None
+    position: int
+    body: str
+    source_memory_ids: List[str] = Field(default_factory=list)
 
 
 class SharedMemoirResponse(BaseModel):
@@ -112,6 +141,8 @@ class SharedMemoirResponse(BaseModel):
     subject_is_living: bool
     description: Optional[str] = None
     can_comment: bool
+    chapters: List[SharedChapterResponse] = Field(default_factory=list)
+    narrative_sections: List[SharedNarrativeSectionResponse] = Field(default_factory=list)
     memories: List[SharedMemoryResponse] = []
 
 

@@ -13,7 +13,7 @@ from xhtml2pdf.config.resources import ResourceAccessPolicy
 
 from src.core.config import settings
 from src.domain.authorization import verify_active_participant
-from src.integrations import participant_repository, storage_adapter
+from src.integrations import narrative_repository, participant_repository, storage_adapter
 from src.integrations.export_repository import ExportRepository
 
 # Long enough to survive PDF generation (download + AssemblyAI-scale documents
@@ -65,8 +65,15 @@ class ExportService:
             media_assets = payload["media_assets"]
             transcripts = payload["transcripts"]
 
+            # Narrative sections, if any exist, replace the raw memory/transcript
+            # listing below (full source text and comments never enter the PDF --
+            # see _render_memoir_html). Photos are always included either way.
+            narrative_sections = narrative_repository.fetch_sections_for_export(memoir_id)
+
             # 2. Build professional print HTML template (Book layout)
-            html_content = cls._render_memoir_html(memoir, memories, media_assets, transcripts)
+            html_content = cls._render_memoir_html(
+                memoir, memories, media_assets, transcripts, narrative_sections
+            )
 
             # 3. Compile HTML to PDF bytes using xhtml2pdf. xhtml2pdf fetches
             # <img>/<link>/@font-face targets over the network while rendering —
@@ -113,7 +120,9 @@ class ExportService:
             )
 
     @staticmethod
-    def _render_memoir_html(memoir: dict, memories: list, media_assets: list, transcripts: list) -> str:
+    def _render_memoir_html(
+        memoir: dict, memories: list, media_assets: list, transcripts: list, narrative_sections: list
+    ) -> str:
         """
         Generates a high-end, printable book layout HTML string.
 
@@ -124,7 +133,17 @@ class ExportService:
         `<img src="http://attacker/…">` typed into a memory would make this
         server issue an outbound request to an address the attacker chose —
         escaping means that text renders as inert, visible characters instead
-        of becoming a tag at all.
+        of becoming a tag at all. The AI-written narrative body is escaped on
+        exactly the same basis, even though it is not directly user-typed: it
+        is model output built from user-supplied memory text, so the same
+        injection surface applies.
+
+        If `narrative_sections` is non-empty, the PDF shows the composed
+        narrative (plus a short attribution line per section) INSTEAD of the
+        raw per-memory listing -- per spec, the PDF contains the AI narrative
+        and photographs, never the full source memory text or comments. A
+        memoir that never generated a narrative keeps the original raw
+        listing, unchanged.
         """
         esc = html.escape
         # memoir has no "title" column (only subject_name) — this always fell
@@ -132,19 +151,34 @@ class ExportService:
         memoir_title = esc(memoir.get("subject_name") or "My Memoir")
         memoir_description = esc(memoir.get("description") or "A curated collection of life memories.")
 
-        memories_html = ""
-        for mem in memories:
-            title = esc(mem.get("title") or "Untitled Entry")
-            date = esc(mem.get("occurred_start") or mem.get("created_at", "")[:10])
-            body = esc(mem.get("body_text") or "").replace(chr(10), "<br>")
+        has_narrative = bool(narrative_sections)
 
-            memories_html += f"""
-            <div class="memory-entry">
-                <div class="memory-meta">{date}</div>
-                <h2>{title}</h2>
-                <div class="memory-body">{body}</div>
-            </div>
-            """
+        narrative_html = ""
+        if has_narrative:
+            for section in narrative_sections:
+                body = esc(section.get("body") or "").replace(chr(10), "<br>")
+                attribution = esc(section.get("attribution_line") or "")
+                narrative_html += f"""
+                <div class="memory-entry">
+                    <div class="memory-body">{body}</div>
+                    {f'<div class="attribution-line">{attribution}</div>' if attribution else ''}
+                </div>
+                """
+
+        memories_html = ""
+        if not has_narrative:
+            for mem in memories:
+                title = esc(mem.get("title") or "Untitled Entry")
+                date = esc(mem.get("occurred_start") or mem.get("created_at", "")[:10])
+                body = esc(mem.get("body_text") or "").replace(chr(10), "<br>")
+
+                memories_html += f"""
+                <div class="memory-entry">
+                    <div class="memory-meta">{date}</div>
+                    <h2>{title}</h2>
+                    <div class="memory-body">{body}</div>
+                </div>
+                """
 
         # Render media photo gallery if any exist. Readers/PDFs never get the
         # raw storage_key — the bucket is private, so the raw path is just a
@@ -166,17 +200,35 @@ class ExportService:
                 </div>
                 """
 
-        # Render audio transcripts section if any exist
+        # Render audio transcripts section if any exist. Skipped entirely when
+        # a narrative exists -- transcripts are full source text, and the PDF
+        # must not contain full source memory text once the narrative is the
+        # memoir's prose. The transcripts remain readable on the web page.
         transcripts_html = ""
-        for t in transcripts:
-            t_text = esc(t.get("display_text") or "")
-            if t_text:
-                transcripts_html += f"""
-                <div class="transcript-box">
-                    <strong>Voice Recording Transcript:</strong>
-                    <p>{t_text}</p>
-                </div>
-                """
+        if not has_narrative:
+            for t in transcripts:
+                t_text = esc(t.get("display_text") or "")
+                if t_text:
+                    transcripts_html += f"""
+                    <div class="transcript-box">
+                        <strong>Voice Recording Transcript:</strong>
+                        <p>{t_text}</p>
+                    </div>
+                    """
+
+        # Closing note for a narrative-driven PDF: in forty years, a family
+        # must be able to tell which words were composed and where the
+        # complete originals live.
+        narrative_note_html = ""
+        if has_narrative:
+            narrative_note_html = """
+            <div class="narrative-note">
+                <p>The biography above was composed by an AI assistant from this family's
+                own recordings and writing, with every passage traceable to a specific
+                memory. The complete original recordings, photographs, and written
+                memories remain on this memoir's web page.</p>
+            </div>
+            """
 
         return f"""
         <!DOCTYPE html>
@@ -255,6 +307,21 @@ class ExportService:
                     color: #666;
                     margin-top: 4px;
                 }}
+                .attribution-line {{
+                    font-size: 8pt;
+                    font-style: italic;
+                    color: #887a64;
+                    margin-top: -4px;
+                }}
+                .narrative-note {{
+                    margin-top: 50px;
+                    padding-top: 20px;
+                    border-top: 1px solid #e6e2d8;
+                    font-size: 9pt;
+                    color: #666;
+                    font-style: italic;
+                    page-break-before: always;
+                }}
                 .transcript-box {{
                     background: #f4efea;
                     border-left: 3px solid #b8a894;
@@ -270,12 +337,14 @@ class ExportService:
                 <p>{memoir_description}</p>
             </div>
             <div class="content">
-                <div class="section-title">Memories</div>
-                {memories_html}
-                
+                <div class="section-title">{'Narrative' if has_narrative else 'Memories'}</div>
+                {narrative_html if has_narrative else memories_html}
+
                 {f'<div class="section-title">Photo Gallery</div>{photos_html}' if photos_html else ''}
-                
+
                 {f'<div class="section-title">Voice Transcripts</div>{transcripts_html}' if transcripts_html else ''}
+
+                {narrative_note_html}
             </div>
         </body>
         </html>

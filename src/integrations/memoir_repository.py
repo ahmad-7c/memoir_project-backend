@@ -77,24 +77,61 @@ def delete_memoir_record(memoir_id: str):
     return supabase_admin.table("memoir").delete().eq("id", memoir_id).execute()
 
 
-def fetch_memoir_by_id(memoir_id: str):
-    """Fetches the full memoir record by ID."""
-    return supabase_admin.table("memoir").select("*").eq("id", memoir_id).execute()
+def publish_memoir_tx(memoir_id: str, owner_user_id: str, token: str):
+    """
+    Calls publish_memoir_tx() (migrations/a1c9e4f27b3d) -- a single Postgres
+    function that flips status, stamps published_at, flags pdf_exportable,
+    and creates the share link all in one transaction. See that migration's
+    docstring for why this has to be a stored function rather than separate
+    .table() calls: postgrest has no multi-statement transaction over HTTP,
+    so three separate calls could leave a memoir published with no share link
+    if the process died between them.
+
+    Raises the underlying postgrest exception on failure -- the caller
+    (MemoirService.publish_memoir) maps its SQLSTATE to the right HTTP status.
+    """
+    return supabase_admin.rpc(
+        "publish_memoir_tx",
+        {
+            "p_memoir_id": memoir_id,
+            "p_owner_user_id": owner_user_id,
+            "p_token": token,
+        },
+    ).execute()
 
 
-def publish_memoir_record(memoir_id: str):
+def update_memoir_comment_policy(memoir_id: str, comment_policy: str):
     """
-    Flips a memoir to 'published' and stamps published_at. Only ever called
-    after MemoirService.publish_memoir has verified ownership and confirmed
-    it isn't already published.
+    Used by ShareService.update_share_link's `can_comment` toggle. Writing
+    through the real memoir.comment_policy column (not a separate flag on
+    memoir_link) means this setting is consistent wherever comment_policy is
+    read -- reader unlock, the reader-only dependency's live re-check, etc.
     """
-    from datetime import datetime, timezone
     return (
         supabase_admin.table("memoir")
-        .update({"status": "published", "published_at": datetime.now(timezone.utc).isoformat()})
+        .update({"comment_policy": comment_policy})
         .eq("id", memoir_id)
         .execute()
     )
+
+
+def fetch_memoir_narrative_reviewed_at(memoir_id: str):
+    """Used only by MemoirService.publish_memoir's narrative-review gate."""
+    res = supabase_admin.table("memoir").select("narrative_reviewed_at").eq("id", memoir_id).execute()
+    return res.data[0].get("narrative_reviewed_at") if res.data else None
+
+
+def fetch_submitted_memory_count(memoir_id: str) -> int:
+    """Used for a pre-flight, user-friendly check before calling publish_memoir_tx."""
+    res = (
+        supabase_admin.table("memory")
+        .select("id", count="exact")
+        .eq("memoir_id", memoir_id)
+        .eq("status", "submitted")
+        .is_("deleted_at", "null")
+        .execute()
+    )
+    return res.count or 0
 
 
 def fetch_memoirs_for_user(user_id: str):

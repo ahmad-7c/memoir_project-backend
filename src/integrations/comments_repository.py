@@ -22,12 +22,27 @@ class CommentsRepository:
         return res.data if res else None
 
     @staticmethod
-    async def get_comments_by_memory_id(memory_id: str) -> List[Dict[str, Any]]:
-        """Fetches raw comments without database embedding to avoid cache sync issues."""
+    async def get_narrative_section_memoir_context(section_id: str) -> Optional[Dict[str, Any]]:
+        """Same resolution, for a comment targeting a narrative section instead of a memory."""
+        res = supabase_admin.table("narrative_section")\
+            .select("id, memoir_id")\
+            .eq("id", section_id)\
+            .maybe_single()\
+            .execute()
+        return res.data if res else None
+
+    @staticmethod
+    async def get_comments(
+        memory_id: Optional[str] = None, narrative_section_id: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """Fetches raw comments for exactly one target, without database embedding to avoid cache sync issues."""
         try:
-            response = supabase_admin.table("comment")\
-                .select("*")\
-                .eq("memory_id", memory_id)\
+            query = supabase_admin.table("comment").select("*")
+            if memory_id:
+                query = query.eq("memory_id", memory_id)
+            if narrative_section_id:
+                query = query.eq("narrative_section_id", narrative_section_id)
+            response = query\
                 .is_("deleted_at", None)\
                 .is_("hidden_at", None)\
                 .order("created_at", desc=False)\
@@ -81,6 +96,7 @@ class CommentsRepository:
             insert_data = {
                 "memoir_id": memoir_id,
                 "memory_id": str(payload["memory_id"]) if payload.get("memory_id") else None,
+                "narrative_section_id": str(payload["narrative_section_id"]) if payload.get("narrative_section_id") else None,
                 "media_asset_id": str(payload["media_asset_id"]) if payload.get("media_asset_id") else None,
                 "parent_comment_id": str(payload["parent_comment_id"]) if payload.get("parent_comment_id") else None,
                 "author_participant_id": participant["id"],
@@ -109,6 +125,7 @@ class CommentsRepository:
             insert_data = {
                 "memoir_id": str(payload["memoir_id"]),
                 "memory_id": str(payload["memory_id"]) if payload.get("memory_id") else None,
+                "narrative_section_id": str(payload["narrative_section_id"]) if payload.get("narrative_section_id") else None,
                 "media_asset_id": str(payload["media_asset_id"]) if payload.get("media_asset_id") else None,
                 "parent_comment_id": str(payload["parent_comment_id"]) if payload.get("parent_comment_id") else None,
                 "author_participant_id": None,
@@ -143,3 +160,42 @@ class CommentsRepository:
         result = {**data[0]}
         result["author_name"] = result.get("author_display_name")
         return result
+
+    @staticmethod
+    async def fetch_comment(comment_id: str, memoir_id: str) -> Optional[Dict[str, Any]]:
+        res = supabase_admin.table("comment")\
+            .select("*")\
+            .eq("id", comment_id)\
+            .eq("memoir_id", memoir_id)\
+            .execute()
+        return res.data[0] if res.data else None
+
+    @staticmethod
+    async def hide_comment(comment_id: str, memoir_id: str, hidden_by_participant_id: str) -> Dict[str, Any]:
+        """Owner moderation: hides a comment (soft) without deleting it outright."""
+        from datetime import datetime, timezone
+
+        res = supabase_admin.table("comment")\
+            .update({
+                "hidden_at": datetime.now(timezone.utc).isoformat(),
+                "hidden_by_participant_id": hidden_by_participant_id,
+            })\
+            .eq("id", comment_id)\
+            .eq("memoir_id", memoir_id)\
+            .execute()
+        if not res.data:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Comment not found.")
+        return res.data[0]
+
+    @staticmethod
+    async def delete_comment(comment_id: str, memoir_id: str) -> None:
+        """Owner moderation: soft-deletes a comment outright."""
+        from datetime import datetime, timezone
+
+        res = supabase_admin.table("comment")\
+            .update({"deleted_at": datetime.now(timezone.utc).isoformat()})\
+            .eq("id", comment_id)\
+            .eq("memoir_id", memoir_id)\
+            .execute()
+        if not res.data:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Comment not found.")

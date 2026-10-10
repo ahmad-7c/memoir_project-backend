@@ -5,10 +5,54 @@ normalizing subject dates, and automatically registering the creator as the owne
 fully decoupled from direct database infrastructure calls.
 """
 
+import secrets
+
 from fastapi import HTTPException, status
 from src.core.config import DEFAULT_VIDEO_BYTES_CAP
-from src.integrations import memoir_repository, participant_repository
+from src.integrations import memoir_repository, narrative_repository, participant_repository
 from src.schemas.memoir import MemoirCreateRequest
+
+# publish_memoir_tx() (migrations/a1c9e4f27b3d) raises these distinct SQLSTATEs
+# so failures can be mapped to the right HTTP status without parsing English
+# error text out of whatever shape postgrest happens to wrap it in.
+_PUBLISH_ERROR_STATUS = {
+    "P0001": (status.HTTP_404_NOT_FOUND, "Memoir not found."),
+    "P0002": (status.HTTP_404_NOT_FOUND, "Memoir not found."),
+    "P0003": (status.HTTP_409_CONFLICT, "This memoir has already been published."),
+    "P0004": (status.HTTP_409_CONFLICT, "Add at least one memory before publishing."),
+}
+
+
+def _raise_for_publish_error(exc: Exception) -> None:
+    """
+    Extracts a Postgres SQLSTATE from a postgrest/RPC exception across the
+    several shapes different client versions use to carry it (mirrors the
+    defensive lookup already used in integrations/proposal_repository.py's
+    _is_unique_violation, for the same reason: no single attribute is reliable
+    across versions). Falls through to a generic 500 for anything unrecognized
+    rather than ever turning an unexpected DB error into a misleading 404/409.
+    """
+    code = None
+    for attr in ("code", "sqlstate", "sql_state"):
+        value = getattr(exc, attr, None)
+        if value:
+            code = str(value)
+            break
+
+    if not code:
+        details = getattr(exc, "details", None)
+        if isinstance(details, dict):
+            code = details.get("code")
+
+    mapped = _PUBLISH_ERROR_STATUS.get(code)
+    if mapped:
+        http_status, detail = mapped
+        raise HTTPException(status_code=http_status, detail=detail)
+
+    raise HTTPException(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        detail=f"Failed to publish memoir: {str(exc)}",
+    )
 
 class MemoirService:
     """
@@ -150,14 +194,20 @@ class MemoirService:
     @staticmethod
     def publish_memoir(memoir_id: str, user_id: str) -> dict:
         """
-        Owner-only. Publishing is the one-way switch that makes a memoir
-        shareable and, per the immutability trigger (migrations/0001), locks
-        its memories/media/transcripts from further edits. Idempotent: if
-        it's already published, this just returns the current record rather
-        than erroring, so re-clicking "share" can never fail on that alone.
+        Owner-only. Publishing is IRREVERSIBLE: it flips status to
+        'published' (locking memories/media/transcripts via the immutability
+        trigger, migrations/d8b7b48a10ea), generates the share link, and
+        flags the memoir exportable to PDF -- all three in one transaction
+        via publish_memoir_tx() (migrations/a1c9e4f27b3d), so a crash
+        mid-publish can never leave a memoir published with no share link.
 
-        Returns 404 (not 403) on a non-owner, matching the pattern used by
-        export and AI-organization access checks elsewhere in this codebase.
+        A second publish attempt is rejected with 409, not treated as a
+        no-op repeat -- re-clicking "share" on an already-published memoir
+        should fetch the existing link (ShareService.create_or_get_share_link
+        already does that), not re-run publish.
+
+        Returns 404 (not 403) on a non-owner/nonexistent memoir, matching the
+        pattern used by export and AI-organization access checks elsewhere.
         """
         participant_res = participant_repository.fetch_participant(memoir_id, user_id)
         participants = participant_res.data or []
@@ -170,18 +220,43 @@ class MemoirService:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Memoir not found.")
 
         if memoir.get("status") == "published":
-            full_res = memoir_repository.fetch_memoir_by_id(memoir_id)
-            return full_res.data[0] if full_res.data else memoir
-
-        try:
-            db_response = memoir_repository.publish_memoir_record(memoir_id)
-        except Exception as e:
             raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to publish memoir: {str(e)}"
+                status_code=status.HTTP_409_CONFLICT,
+                detail="This memoir has already been published.",
             )
 
-        if not db_response.data:
+        if memoir_repository.fetch_submitted_memory_count(memoir_id) == 0:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Add at least one memory before publishing.",
+            )
+
+        # Publishing is irreversible and the narrative is AI-written text.
+        # Nobody should be able to publish an unread AI biography of their
+        # dead parent -- so if any narrative sections exist, the owner must
+        # have explicitly marked them reviewed first.
+        if narrative_repository.narrative_sections_exist(memoir_id):
+            if memoir_repository.fetch_memoir_narrative_reviewed_at(memoir_id) is None:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="Please review the AI-written narrative before publishing.",
+                )
+
+        # Generated here (not left to a Postgres column default) per spec:
+        # the share token must come from secrets.token_urlsafe(32), the same
+        # primitive used for the reader JWT secret elsewhere in this app.
+        token = secrets.token_urlsafe(32)
+
+        try:
+            db_response = memoir_repository.publish_memoir_tx(memoir_id, user_id, token)
+        except Exception as e:
+            _raise_for_publish_error(e)
+            raise  # _raise_for_publish_error always raises; satisfies static analysis
+
+        data = db_response.data
+        if isinstance(data, list):
+            data = data[0] if data else None
+        if not data:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Memoir not found.")
 
-        return db_response.data[0]
+        return data

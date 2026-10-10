@@ -239,19 +239,40 @@ is. Both halves are required; a mismatch produces a 401 that looks like a backen
 
 | Where | Variable | Value |
 |---|---|---|
-| Vercel | `NEXT_PUBLIC_API_URL` (or whatever the repo calls it) | `https://api.your-domain.com` |
-| Vercel | Supabase URL + anon key | same project as the backend |
-| Vercel | `NEXT_PUBLIC_SITE_URL` | `https://your-vercel-domain.vercel.app` |
+| Vercel | `NEXT_PUBLIC_API_BASE_URL` | `https://api.your-domain.com` |
+| Vercel | `NEXT_PUBLIC_API_TIMEOUT_MS` *(optional)* | `10000` |
 | ECS | `CORS_ORIGINS` | the Vercel origin, **no trailing slash** |
 | ECS | `SHARE_LINK_BASE_URL` | `https://your-vercel-domain.vercel.app/share` |
+
+`NEXT_PUBLIC_API_BASE_URL` is the only `NEXT_PUBLIC_` variable the deployed app needs.
+
+There is no `NEXT_PUBLIC_API_URL` and no `NEXT_PUBLIC_SITE_URL`; an earlier revision of this table
+listed both, and setting either achieves nothing. `NEXT_PUBLIC_SUPABASE_URL` and
+`NEXT_PUBLIC_SUPABASE_ANON_KEY` do appear in `frontend/src/lib/config/env.ts`, but they are
+declared optional and nothing imports them — auth is entirely backend-issued. Do not set them on
+Vercel unless a future feature adds direct client-side Supabase access.
+
+These names were read out of `frontend/src`, not inferred. Note that they point in opposite
+directions, which is the part that is easy to get backwards: `NEXT_PUBLIC_API_BASE_URL` names the
+**backend**, and `CORS_ORIGINS` names the **frontend**. Setting only one half is the failure this
+section exists to prevent.
+
+**`NEXT_PUBLIC_*` is inlined at build time.** Next.js replaces every reference to it in the client
+bundle with a literal value during `next build`, so the deployed app does not read the variable at
+runtime. Adding or changing one on Vercel requires a **redeploy** to take effect; editing the
+variable alone changes nothing.
+
+**It is currently unenforced.** `frontend/src/lib/config/env.ts` validates this variable with Zod
+and throws at boot if it is missing or malformed — but no module imports `env.ts`, including
+`src/lib/api/client.ts`, which reads `process.env` directly and falls back to
+`http://localhost:8000`. So in practice a forgotten variable does not fail loudly: every user's
+browser quietly tries to call their own machine, and it surfaces as a generic network error rather
+than a CORS one. Treat the variable as required and verify it explicitly.
 
 The cross-domain cookie is the thing that breaks. Vercel and AWS are different registrable domains,
 so the auth cookie must be `SameSite=None; Secure`. `COOKIE_SAMESITE=none` without
 `COOKIE_SECURE=true` is refused at boot; browsers discard such a cookie outright, login appears to
 succeed, and every subsequent request is unauthenticated.
-
-Confirm the exact variable names against `frontend/` before wiring them — the name above is the
-conventional one, not a verified one.
 
 ---
 

@@ -11,11 +11,17 @@ than for coverage's sake. Three revisions in the chain are not idempotent:
     879e2c8d1b8c  ADD CONSTRAINT
     080151e0f1e8  DROP CONSTRAINT
     cd3760273110  DROP COLUMN + ADD COLUMN
+    a1c9e4f27b3d  ADD COLUMN (memoir.pdf_exportable, user_account.subscription_status)
+    b7d2a93f4c1e  ADD COLUMN (memoir.narrative_reviewed_at)
+    c4f8e1a9b2d7  ADD COLUMN (comment.narrative_section_id)
 
 `alembic upgrade head` from any revision at or behind those either fails on a
 duplicate object or -- for cd3760273110 -- succeeds and empties the
 `organization_status` columns on `memoir`, destroying every organize run ever
-recorded. `scripts/migrate.py` exists to refuse that, and it can only work if
+recorded. `a1c9e4f27b3d` is in the "fails on a duplicate object" category, not
+the destructive one -- it only ADDs columns, nothing is dropped -- but it is
+still listed here rather than silently passing the generic add/drop scanner.
+`scripts/migrate.py` exists to refuse that, and it can only work if
 the set of non-idempotent revisions does not quietly grow. That is what
 `test_non_idempotent_revisions_are_exactly_the_documented_set` is for.
 """
@@ -33,9 +39,15 @@ VERSIONS_DIR = BACKEND_ROOT / "alembic" / "versions"
 # Revisions ahead of the two new ones. `scripts/migrate.py` hard-codes the safe
 # set; these constants are the other half of that contract, and the two files
 # failing apart is the hazard.
-SAFE_TO_ADVANCE_FROM = {"cd3760273110", "d8ebd28b0d20"}
+SAFE_TO_ADVANCE_FROM = {"cd3760273110", "d8ebd28b0d20", "e7a41c5b9f32", "a1c9e4f27b3d", "b7d2a93f4c1e"}
 PRE_NEW_HEAD = "d8ebd28b0d20"
-HEAD = "e7a41c5b9f32"
+# The job-run/proposal pair's own head, before the publish/profile migration
+# was added ahead of it. Kept as a literal (not reused as a variable named
+# after the old HEAD) because test_every_new_revision_chains_from_the_revision_before_it
+# below is pinned to this specific historical pair, independent of whatever
+# HEAD is today.
+PREVIOUS_HEAD = "b7d2a93f4c1e"
+HEAD = "c4f8e1a9b2d7"
 
 NEW_TABLES = (
     "organization_job_run",
@@ -93,7 +105,64 @@ def test_every_new_revision_chains_from_the_revision_before_it():
         "the job-run migration must chain directly from the previous head, or "
         "scripts/migrate.py's safe-advance set is wrong"
     )
-    assert downgrades[HEAD] == "c3f9a1b204d7"
+    # Literal, not PREVIOUS_HEAD: this test is pinned to this specific
+    # historical pair (job-run + proposal), independent of whatever the
+    # overall chain's PREVIOUS_HEAD/HEAD are today.
+    assert downgrades["e7a41c5b9f32"] == "c3f9a1b204d7"
+
+
+def test_the_publish_migration_chains_directly_from_the_previous_head():
+    """
+    `a1c9e4f27b3d` (profile columns + publish_memoir_tx) must descend directly
+    from `e7a41c5b9f32`, with no gap -- same rationale as the test above, for
+    that revision instead of the job-run/proposal pair. Literal, not
+    HEAD/PREVIOUS_HEAD: pinned to this specific historical pair so a later
+    migration changing those constants doesn't silently stop checking it.
+    """
+    from alembic.config import Config
+    from alembic.script import ScriptDirectory
+
+    cfg = Config(str(BACKEND_ROOT / "alembic.ini"))
+    cfg.set_main_option("script_location", str(BACKEND_ROOT / "alembic"))
+    script = ScriptDirectory.from_config(cfg)
+
+    downgrades = {rev.revision: rev.down_revision for rev in script.walk_revisions()}
+    assert downgrades["a1c9e4f27b3d"] == "e7a41c5b9f32"
+
+
+def test_the_narrative_migration_chains_directly_from_the_previous_head():
+    """
+    `b7d2a93f4c1e` (narrative_section/narrative_source/narrative_generation_run
+    + memoir.narrative_reviewed_at) must descend directly from `a1c9e4f27b3d`,
+    with no gap. Literal, same reasoning as the test above: pinned to this
+    specific historical pair.
+    """
+    from alembic.config import Config
+    from alembic.script import ScriptDirectory
+
+    cfg = Config(str(BACKEND_ROOT / "alembic.ini"))
+    cfg.set_main_option("script_location", str(BACKEND_ROOT / "alembic"))
+    script = ScriptDirectory.from_config(cfg)
+
+    downgrades = {rev.revision: rev.down_revision for rev in script.walk_revisions()}
+    assert downgrades["b7d2a93f4c1e"] == "a1c9e4f27b3d"
+
+
+def test_the_share_link_hardening_migration_chains_directly_from_the_previous_head():
+    """
+    `c4f8e1a9b2d7` (chapter/narrative_section immutability triggers,
+    memoir_link-requires-published trigger, comment.narrative_section_id)
+    must descend directly from the previous head, with no gap.
+    """
+    from alembic.config import Config
+    from alembic.script import ScriptDirectory
+
+    cfg = Config(str(BACKEND_ROOT / "alembic.ini"))
+    cfg.set_main_option("script_location", str(BACKEND_ROOT / "alembic"))
+    script = ScriptDirectory.from_config(cfg)
+
+    downgrades = {rev.revision: rev.down_revision for rev in script.walk_revisions()}
+    assert downgrades[HEAD] == PREVIOUS_HEAD
 
 
 def test_revision_ids_are_unique():
@@ -112,6 +181,9 @@ NON_IDEMPOTENT = {
     "879e2c8d1b8c": "ADD CONSTRAINT",
     "080151e0f1e8": "DROP CONSTRAINT",
     "cd3760273110": "DROP COLUMN + ADD COLUMN (destroys organization_status)",
+    "a1c9e4f27b3d": "ADD COLUMN (memoir.pdf_exportable, user_account.subscription_status)",
+    "b7d2a93f4c1e": "ADD COLUMN (memoir.narrative_reviewed_at)",
+    "c4f8e1a9b2d7": "ADD COLUMN (comment.narrative_section_id)",
 }
 
 

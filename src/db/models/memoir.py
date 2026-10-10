@@ -23,6 +23,17 @@ class Memoir(Base):
     )
     status: Mapped[str] = mapped_column(_enums.memoir_status, nullable=False, server_default="draft")
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Set atomically with status/published_at by publish_memoir_tx() (see the
+    # publish migration) -- a flag rather than inferring "exportable" from
+    # status alone, so a future rule (e.g. temporarily disabling exports)
+    # doesn't have to be encoded as a fake status value.
+    pdf_exportable: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
+    # Null until the owner explicitly confirms they've read the AI-written
+    # narrative. publish_memoir rejects with 409 if sections exist and this
+    # is still null -- publishing is irreversible, and this text is
+    # AI-written, so nobody should be able to publish an unread AI biography
+    # of their dead parent.
+    narrative_reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     visibility: Mapped[str] = mapped_column(_enums.memoir_visibility, nullable=False, server_default="invited_only")
     view_password_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
     comment_policy: Mapped[str] = mapped_column(_enums.comment_policy, nullable=False, server_default="invited_only")

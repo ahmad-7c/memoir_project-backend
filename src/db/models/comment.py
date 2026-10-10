@@ -13,6 +13,7 @@ class Comment(Base):
     __table_args__ = (
         Index("idx_comment_memoir_id", "memoir_id"),
         Index("idx_comment_memory_id", "memory_id"),
+        Index("idx_comment_narrative_section_id", "narrative_section_id"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -22,6 +23,13 @@ class Comment(Base):
     # No FK in the live schema — faithfully replicated.
     memory_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
     media_asset_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    # A comment targets exactly one of memory_id / narrative_section_id (the
+    # AI-composed prose itself). Enforced in the application layer, where the
+    # richer "exactly one, not zero, not both" rule can live; the FK here only
+    # guarantees the id, when present, is real.
+    narrative_section_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("narrative_section.id", ondelete="CASCADE"), nullable=True
+    )
     parent_comment_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("comment.id", ondelete="CASCADE"), nullable=True
     )

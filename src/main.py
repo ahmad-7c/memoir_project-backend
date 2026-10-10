@@ -29,6 +29,8 @@ from src.api.export import router as export_router
 from src.api.transcripts import router as transcript_router
 from src.api.organization import organization_router
 from src.api.organize_page import router as organize_page_router
+from src.api.profile import router as profile_router
+from src.api.narrative import router as narrative_router
 
 def setup_logging():
     """Configures root logging format and log level for backend services."""
@@ -154,6 +156,8 @@ app.include_router(transcript_router)
 app.include_router(organization_router)
 app.include_router(owner_router)
 app.include_router(reader_router)
+app.include_router(profile_router)
+app.include_router(narrative_router)
 
 # Static review console. Registered last so its `/organize/{memoir_id}` path
 # cannot shadow an API route -- and it does not: the API's paths all begin

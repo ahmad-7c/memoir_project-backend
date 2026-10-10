@@ -21,6 +21,9 @@ from src.db.models.memoir_link import MemoirLink
 from src.db.models.memoir_export import MemoirExport
 from src.db.models.organization_job_run import OrganizationAgentRun, OrganizationJobRun
 from src.db.models.organization_proposal import OrganizationActionAudit, OrganizationProposal
+from src.db.models.narrative_section import NarrativeSection
+from src.db.models.narrative_source import NarrativeSource
+from src.db.models.narrative_generation_run import NarrativeGenerationRun
 
 __all__ = [
     "UserAccount",
@@ -38,4 +41,7 @@ __all__ = [
     "OrganizationAgentRun",
     "OrganizationProposal",
     "OrganizationActionAudit",
+    "NarrativeSection",
+    "NarrativeSource",
+    "NarrativeGenerationRun",
 ]

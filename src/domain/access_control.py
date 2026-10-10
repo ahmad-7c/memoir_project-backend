@@ -37,6 +37,7 @@ def resolve_memoir_access(
     authorization: Optional[str],
     expected_share_link_id: Optional[str] = None,
     unauthenticated_status: int = status.HTTP_404_NOT_FOUND,
+    cookie_token: Optional[str] = None,
 ) -> AccessResult:
     """
     Grants access if the bearer token is EITHER a valid reader token scoped to this
@@ -47,8 +48,18 @@ def resolve_memoir_access(
     404 (default) for routes that must not reveal whether the resource exists, or 401
     for routes where a reader token is the expected credential and the frontend needs
     to distinguish "please re-enter the password" from "this link is dead".
+
+    `cookie_token` is the owner's httpOnly access_token cookie value, when the caller
+    has one. A browser owner session lives ONLY in that cookie (src/core/auth.py) --
+    frontend JS cannot read it to build an `Authorization` header, so a route that
+    checked the header alone would never authenticate an owner's own browser session,
+    only a manual Bearer-token caller (scripts/tests). The reader path is unaffected:
+    a reader never has this cookie, so it only ever matters as an owner fallback, tried
+    after the header is confirmed not to be a reader token.
     """
     token = extract_bearer_token(authorization)
+    if not token:
+        token = cookie_token
     if not token:
         raise HTTPException(status_code=unauthenticated_status, detail="Not found.")
 
