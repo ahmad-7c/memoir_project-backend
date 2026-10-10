@@ -35,7 +35,13 @@ jobs:
 
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.14"
+          # Pinned below the Docker image's 3.14 on purpose: actions/setup-python
+          # resolves versions against actions/python-versions' manifest, which
+          # doesn't have 3.14 yet (see actions/setup-python#1313) -- this step
+          # only runs pytest/alembic on the runner itself, never the production
+          # container (that pulls python:3.14-slim-bookworm straight from Docker
+          # Hub in the Dockerfile, a separate path this doesn't touch).
+          python-version: "3.13"
           cache: "pip"
           cache-dependency-path: backend/requirements.txt
 
@@ -73,7 +79,7 @@ jobs:
 
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.14"
+          python-version: "3.13"
           cache: "pip"
           cache-dependency-path: backend/requirements.txt
 
@@ -157,7 +163,7 @@ jobs:
 
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.14"
+          python-version: "3.13"
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
