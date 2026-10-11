@@ -28,6 +28,25 @@ class ShareRepository:
             raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
 
     @staticmethod
+    async def list_active_participants(memoir_id: str) -> List[Dict[str, Any]]:
+        """
+        Every active (non-removed) participant on a memoir -- the real,
+        already-stored family members who have unlocked the share link or
+        been added as collaborators, not placeholder names. Oldest-joined
+        first, consistent with the memory feed's own created_at ordering.
+        """
+        try:
+            res = supabase_admin.table("memoir_participant")\
+                .select("id, display_name, relationship, relationship_label, role, first_opened_at")\
+                .eq("memoir_id", memoir_id)\
+                .is_("removed_at", None)\
+                .order("created_at")\
+                .execute()
+            return res.data or []
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+
+    @staticmethod
     async def get_memoir_by_id(memoir_id: str) -> Optional[Dict[str, Any]]:
         res = supabase_admin.table("memoir").select("*").eq("id", memoir_id).execute()
         return res.data[0] if res.data else None

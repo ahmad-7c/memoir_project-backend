@@ -65,6 +65,14 @@ class ShareService:
         return link
 
     @staticmethod
+    async def list_participants(memoir_id: str, user_id: str):
+        """Owner-only. Every real, active participant -- who has actually joined, not a placeholder list."""
+        participant = await ShareRepository.get_owner_participant(memoir_id, user_id)
+        if not participant:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Memoir not found.")
+        return await ShareRepository.list_active_participants(memoir_id)
+
+    @staticmethod
     async def update_share_link(memoir_id: str, user_id: str, payload, scope: str = "view"):
         participant = await ShareRepository.get_owner_participant(memoir_id, user_id)
         if not participant:

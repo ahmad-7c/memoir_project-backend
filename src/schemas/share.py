@@ -53,6 +53,21 @@ class ShareLinkResponseEnvelope(BaseModel):
     data: ShareLinkResponse
 
 
+class ParticipantResponse(BaseModel):
+    id: str
+    display_name: str
+    relationship: str
+    relationship_label: Optional[str] = None
+    role: str
+    first_opened_at: Optional[datetime] = None
+
+
+class ParticipantListResponseEnvelope(BaseModel):
+    success: bool = True
+    message: str = "Operation successful"
+    data: List[ParticipantResponse]
+
+
 class UnlockRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     display_name: str

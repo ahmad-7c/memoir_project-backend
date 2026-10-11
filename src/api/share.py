@@ -15,7 +15,7 @@ from src.integrations.share_repository import ShareRepository
 from src.schemas.comments import CommentCreate, CommentResponse
 from src.schemas.narrative import NarrativeSourcesResponse, SourceMediaResponse, SourceMemoryResponse
 from src.schemas.share import (
-    ShareLinkResponse, ShareLinkResponseEnvelope, ShareLinkUpdateRequest,
+    ParticipantListResponseEnvelope, ShareLinkResponse, ShareLinkResponseEnvelope, ShareLinkUpdateRequest,
     SharedChapterResponse, SharedMemoirResponse, SharedMemoirResponseEnvelope,
     SharedMediaAssetResponse, SharedMemoryResponse, SharedNarrativeSectionResponse,
     UnlockRequest, UnlockResponse, UnlockResponseEnvelope,
@@ -68,6 +68,13 @@ async def delete_share_link(memoir_id: str, current_user: dict = Depends(get_cur
     user_id = str(current_user.get("user_id") or current_user.get("id") or current_user.get("sub"))
     await ShareService.revoke_share_link(memoir_id, user_id)
     return {"success": True, "message": "Share link revoked."}
+
+@owner_router.get("/{memoir_id}/participants", response_model=ParticipantListResponseEnvelope)
+async def list_participants(memoir_id: str, current_user: dict = Depends(get_current_user)):
+    """Real, active participants only -- whoever has actually joined this memoir."""
+    user_id = str(current_user.get("user_id") or current_user.get("id") or current_user.get("sub"))
+    participants = await ShareService.list_participants(memoir_id, user_id)
+    return {"success": True, "message": "Operation successful", "data": participants}
 
 # --- READER ROUTES ---
 
