@@ -3,7 +3,8 @@
 @description FastAPI router for user registration and authentication endpoints.
 """
 
-from fastapi import APIRouter, Request, Response, status
+from fastapi import APIRouter, Depends, Request, Response, status
+from src.core.rate_limit import rate_limit_auth
 from src.core.config import (
     ACCESS_TOKEN_COOKIE_MAX_AGE,
     ACCESS_TOKEN_COOKIE_NAME,
@@ -54,7 +55,7 @@ def _set_refresh_token_cookie(response: Response, refresh_token: str) -> None:
     )
 
 
-@router.post("/signup", status_code=status.HTTP_201_CREATED)
+@router.post("/signup", status_code=status.HTTP_201_CREATED, dependencies=[Depends(rate_limit_auth)])
 def register_user_endpoint(payload: UserRegisterRequest, response: Response):
     """
     Registers a new user account and triggers automatic database account
@@ -87,7 +88,7 @@ def register_user_endpoint(payload: UserRegisterRequest, response: Response):
     }
 
 
-@router.post("/login", status_code=status.HTTP_200_OK)
+@router.post("/login", status_code=status.HTTP_200_OK, dependencies=[Depends(rate_limit_auth)])
 def login_user_endpoint(payload: UserLoginRequest, response: Response):
     """Authenticates an existing user and starts their session via an httpOnly cookie."""
     result = AuthService.login_user(payload)

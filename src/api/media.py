@@ -7,12 +7,13 @@ from fastapi import APIRouter, Depends, status
 from src.schemas.media import PresignedUrlRequest, MediaMetadataRequest
 from src.domain.media_service import MediaService
 from src.core.auth import get_current_user  # Production JWT verification dependency
+from src.core.rate_limit import rate_limit_upload_url
 
 router = APIRouter(prefix="/api/media", tags=["Media Management"])
 
-@router.post("/presigned-url")
+@router.post("/presigned-url", dependencies=[Depends(rate_limit_upload_url)])
 def create_presigned_url(
-    payload: PresignedUrlRequest, 
+    payload: PresignedUrlRequest,
     current_user_id: str = Depends(get_current_user)
 ):
     """

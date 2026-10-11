@@ -7,16 +7,22 @@ and mounts all modular feature routers.
 
 import logging
 from contextlib import asynccontextmanager
+from urllib.parse import urlparse
 from dotenv import load_dotenv
 from src.core.config import settings, database_url_for_psycopg
 from src.api.share import owner_router, reader_router
 
-# CRITICAL: load_dotenv() must be called BEFORE any other application modules 
+# CRITICAL: load_dotenv() must be called BEFORE any other application modules
 # are imported so database and storage configurations can read environment variables.
-load_dotenv()  
+load_dotenv()
 
-from fastapi import FastAPI, HTTPException, status
+from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+
+from src.core.security_headers import SecurityHeadersMiddleware
+from src.core.request_id import RequestIDMiddleware
+from src.core.request_guards import RequestGuardMiddleware
 
 # Import modular feature routers
 from src.api.media import router as media_router
@@ -69,15 +75,77 @@ origins = settings.cors_origins
 if isinstance(origins, str):
     origins = [o.strip() for o in origins.split(",") if o.strip()]
 
-# Configure CORS (Cross-Origin Resource Sharing) middleware 
-# to allow secure communication with the Next.js frontend client.
+# ---------------------------------------------------------------------------
+# Middleware registration order matters and is a common source of silent
+# security holes -- and Starlette's actual rule here is easy to get
+# backwards. `Starlette.add_middleware` does `user_middleware.insert(0, ...)`,
+# so each new call pushes earlier ones further from the front of that list;
+# the stack is then built by wrapping in reverse over
+# `[ServerErrorMiddleware] + user_middleware + [ExceptionMiddleware]`. Net
+# effect: the LAST middleware added via add_middleware ends up OUTERMOST
+# (right inside Starlette's own ServerErrorMiddleware), not the first. So to
+# get, outermost to innermost:
+#
+#   1. Security headers (outermost -- must apply even to error responses)
+#   2. CORS
+#   3. Request ID / logging
+#   4. Request guards (body size cap, Content-Type validation)
+#   5. (rate limiting + authentication are per-route FastAPI dependencies,
+#      not global middleware -- see src/core/rate_limit.py and the
+#      `dependencies=[...]` on individual routes. They run after the layers
+#      above and before the route body, which is the same place in the
+#      request's lifecycle this ordering calls for.)
+#   6. Routes
+#
+# ...the calls below are written in the REVERSE of that list.
+# ---------------------------------------------------------------------------
+
+_supabase_origin = urlparse(settings.supabase_url).scheme + "://" + urlparse(settings.supabase_url).netloc
+
+app.add_middleware(RequestGuardMiddleware)
+app.add_middleware(RequestIDMiddleware)
+
+# Configure CORS (Cross-Origin Resource Sharing) middleware to allow secure
+# communication with the Next.js frontend client. Methods/headers are the
+# real, exhaustive list this API uses -- not a wildcard. Never allow_origins
+# with "*", and never combined with allow_credentials=True (which this API
+# requires, for the httpOnly session cookie): browsers reject that
+# combination outright, and validate_browser_delivery_settings() in
+# src/core/config.py also refuses to even boot on it.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization"],
 )
+
+# Added LAST so it is OUTERMOST -- see the ordering note above.
+app.add_middleware(SecurityHeadersMiddleware, supabase_origin=_supabase_origin)
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    """
+    Converts any exception that no route/dependency handled into a flat,
+    generic 500 -- no stack trace, no internal path, nothing an attacker (or
+    an anxious, grieving user staring at an error screen) can learn from the
+    response body. The real detail still goes to the server log, keyed by
+    the same request id the response carries (see RequestIDMiddleware), so
+    it's fully debuggable from there.
+
+    This also happens to be *why* the security-headers middleware can be
+    outermost and still simple: Starlette's own fallback for a truly
+    unhandled exception bypasses ordinary middleware response processing,
+    so without this handler such a response could in principle be the one
+    kind of response that misses the headers above. Registering a handler
+    means FastAPI's ExceptionMiddleware (which sits just inside this app's
+    user middleware stack) produces the response instead, and that DOES
+    flow back out through every middleware normally.
+    """
+    request_id = getattr(request.state, "request_id", None) or request.scope.get("state", {}).get("request_id")
+    logging.exception("Unhandled exception (request_id=%s): %s", request_id, exc)
+    return JSONResponse(status_code=500, content={"detail": "Something went wrong. Please try again."})
 
 
 @app.get("/", tags=["Root"])

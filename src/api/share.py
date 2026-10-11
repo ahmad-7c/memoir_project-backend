@@ -8,6 +8,7 @@ from src.core.reader_auth import ShareContext
 from src.domain.access_control import resolve_memoir_access
 from src.domain.reader_access import get_share_context
 from src.domain.share_service import ShareService
+from src.core.rate_limit import rate_limit_unlock
 from src.integrations.comments_repository import CommentsRepository
 from src.integrations import narrative_repository
 from src.integrations.share_repository import ShareRepository
@@ -70,7 +71,11 @@ async def delete_share_link(memoir_id: str, current_user: dict = Depends(get_cur
 
 # --- READER ROUTES ---
 
-@reader_router.post("/{token}/unlock", response_model=UnlockResponseEnvelope)
+@reader_router.post(
+    "/{token}/unlock",
+    response_model=UnlockResponseEnvelope,
+    dependencies=[Depends(rate_limit_unlock)],
+)
 async def unlock_shared_memoir(token: str, payload: UnlockRequest):
     """
     A reader identifies themselves with a name + the password the owner shared
