@@ -9,7 +9,9 @@ import secrets
 
 from fastapi import HTTPException, status
 from src.core.config import DEFAULT_VIDEO_BYTES_CAP
-from src.integrations import memoir_repository, narrative_repository, participant_repository
+from src.domain.authorization import assert_memoir_editable, verify_active_participant
+from src.integrations import media_repository, memoir_repository, narrative_repository, participant_repository
+from src.integrations import profile_repository
 from src.schemas.memoir import MemoirCreateRequest
 
 # publish_memoir_tx() (migrations/a1c9e4f27b3d) raises these distinct SQLSTATEs
@@ -180,6 +182,13 @@ class MemoirService:
         frontend tell "returning user with an existing memoir" apart from
         "brand new user who needs onboarding" without relying on anything
         stashed client-side.
+
+        Each memoir also carries a resolved `cover_image_url` (a signed
+        playback URL, not the raw `cover_media_id`) -- the same resolution
+        profile_service already does for the profile page's memoir list,
+        done here too so /memories, /chapters and /memoir (which all read
+        this endpoint, not the profile one) can show a real cover photo
+        instead of a placeholder.
         """
         try:
             res = memoir_repository.fetch_memoirs_for_user(user_id)
@@ -189,7 +198,50 @@ class MemoirService:
                 detail=f"Failed to fetch memoirs: {str(e)}"
             )
         rows = res.data or []
-        return [row["memoir"] for row in rows if row.get("memoir")]
+        memoirs = [row["memoir"] for row in rows if row.get("memoir")]
+
+        cover_media_ids = [str(m["cover_media_id"]) for m in memoirs if m.get("cover_media_id")]
+        cover_urls = profile_repository.fetch_cover_image_urls(cover_media_ids)
+        for m in memoirs:
+            cover_media_id = m.get("cover_media_id")
+            m["cover_image_url"] = cover_urls.get(str(cover_media_id)) if cover_media_id else None
+
+        return memoirs
+
+    @staticmethod
+    def set_cover_photo(memoir_id: str, user_id: str, media_id: str) -> str | None:
+        """
+        Owner-only. Points the memoir at an already-uploaded photo (the
+        normal presigned-url + metadata flow, same as any other memory
+        photo) -- verified here to actually belong to this memoir, so a
+        client can't point a memoir's cover at someone else's media asset
+        just by guessing/reusing an id.
+        """
+        verify_active_participant(memoir_id, user_id, required_roles=["owner"])
+        assert_memoir_editable(memoir_id)
+
+        media = media_repository.fetch_media_asset(media_id, memoir_id)
+        if not media:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="That photo isn't part of this memoir.",
+            )
+        if media.get("kind") != "photo":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="The cover must be a photo.",
+            )
+
+        try:
+            memoir_repository.update_memoir_cover(memoir_id, media_id)
+        except Exception as e:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to set cover photo: {str(e)}",
+            )
+
+        urls = profile_repository.fetch_cover_image_urls([media_id])
+        return urls.get(media_id)
 
     @staticmethod
     def publish_memoir(memoir_id: str, user_id: str) -> dict:

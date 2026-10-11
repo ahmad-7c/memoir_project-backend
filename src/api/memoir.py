@@ -4,7 +4,12 @@
 """
 
 from fastapi import APIRouter, Depends, status
-from src.schemas.memoir import MemoirCreateRequest, MemoirResponseEnvelope
+from src.schemas.memoir import (
+    MemoirCoverResponseEnvelope,
+    MemoirCoverUpdateRequest,
+    MemoirCreateRequest,
+    MemoirResponseEnvelope,
+)
 from src.domain.memoir_service import MemoirService
 from src.core.auth import get_current_user
 
@@ -46,6 +51,22 @@ def list_my_memoirs(current_user: dict = Depends(get_current_user)):
     user_id = current_user.get("user_id") or current_user.get("id") or current_user.get("sub")
     memoirs = MemoirService.list_user_memoirs(user_id)
     return {"success": True, "data": memoirs}
+
+
+@router.put("/{memoir_id}/cover", response_model=MemoirCoverResponseEnvelope)
+def set_memoir_cover(
+    memoir_id: str,
+    payload: MemoirCoverUpdateRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Owner-only. Sets the memoir's cover photo to an already-uploaded media
+    asset (upload it first via POST /api/media/presigned-url + /api/media/metadata,
+    same flow as any other photo).
+    """
+    user_id = current_user.get("user_id") or current_user.get("id") or current_user.get("sub")
+    cover_image_url = MemoirService.set_cover_photo(memoir_id, user_id, str(payload.media_id))
+    return {"success": True, "message": "Cover photo updated.", "data": {"cover_image_url": cover_image_url}}
 
 
 @router.post("/{memoir_id}/publish", status_code=status.HTTP_200_OK)

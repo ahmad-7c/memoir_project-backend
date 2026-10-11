@@ -115,6 +115,16 @@ def update_memoir_comment_policy(memoir_id: str, comment_policy: str):
     )
 
 
+def update_memoir_cover(memoir_id: str, media_id: str):
+    """Sets the memoir's cover photo to an already-uploaded media asset."""
+    return (
+        supabase_admin.table("memoir")
+        .update({"cover_media_id": media_id})
+        .eq("id", memoir_id)
+        .execute()
+    )
+
+
 def fetch_memoir_narrative_reviewed_at(memoir_id: str):
     """Used only by MemoirService.publish_memoir's narrative-review gate."""
     res = supabase_admin.table("memoir").select("narrative_reviewed_at").eq("id", memoir_id).execute()

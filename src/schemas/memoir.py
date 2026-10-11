@@ -72,3 +72,14 @@ class MemoirResponseEnvelope(BaseModel):
     success: bool = True
     message: str = "Operation successful"
     data: MemoirResponseData
+
+
+class MemoirCoverUpdateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    media_id: uuid.UUID = Field(..., description="id of an already-uploaded photo media asset belonging to this memoir")
+
+
+class MemoirCoverResponseEnvelope(BaseModel):
+    success: bool = True
+    message: str = "Operation successful"
+    data: dict
