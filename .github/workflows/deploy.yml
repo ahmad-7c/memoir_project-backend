@@ -131,24 +131,36 @@ jobs:
         id: push
         # This is NOT ECR -- Lightsail container services have their own
         # per-service image registry, and this command is the only way into
-        # it. The CLI prints the real reference to use in a deployment
-        # (service.label.version) to stdout; nothing about that string is
-        # predictable ahead of time, so it has to be scraped from the output
-        # rather than constructed.
+        # it.
+        #
+        # The reference to use in a deployment (service.label.version) used
+        # to be scraped from lightsailctl's stdout via grep -- fragile, and
+        # the actual cause of a real failure (2026-10-12): the deployment
+        # job received an empty image_ref from it despite the push itself
+        # succeeding, with no clear indication why in a non-interactive CI
+        # shell. Querying get-container-images after a successful push and
+        # taking the newest entry (the API returns them newest-first) is a
+        # few more lines but doesn't depend on lightsailctl's stdout
+        # formatting staying stable or behaving identically outside a real
+        # terminal.
         run: |
           set -o pipefail
           aws lightsail push-container-image \
             --region "$AWS_REGION" \
             --service-name "$LIGHTSAIL_SERVICE_NAME" \
             --label api \
-            --image "memoir-backend:${{ github.sha }}" \
-            2>&1 | tee push_output.txt
+            --image "memoir-backend:${{ github.sha }}"
 
-          image_ref=$(grep -oP '(?<=Refer to this image as ")[^"]+' push_output.txt)
-          if [ -z "$image_ref" ]; then
-            echo "Could not parse the pushed image reference from lightsailctl output." >&2
+          image_ref=$(aws lightsail get-container-images \
+            --region "$AWS_REGION" \
+            --service-name "$LIGHTSAIL_SERVICE_NAME" \
+            --query "containerImages[0].image" --output text)
+
+          if [ -z "$image_ref" ] || [ "$image_ref" = "None" ]; then
+            echo "get-container-images returned no image after a successful push -- this should not happen." >&2
             exit 1
           fi
+          echo "Resolved image_ref: $image_ref"
           echo "image_ref=$image_ref" >> "$GITHUB_OUTPUT"
 
   deploy:
@@ -189,6 +201,15 @@ jobs:
           import os
 
           image_ref = os.environ["IMAGE_REF"]
+          if not image_ref.strip():
+              # Fail here, loudly, rather than writing an empty "image" field
+              # that only surfaces three steps later as AWS's own opaque
+              # "cannot be empty" error from create-container-service-deployment.
+              raise SystemExit(
+                  "IMAGE_REF is empty -- the image reference did not propagate "
+                  "from the build-and-push job's output. Check that job's "
+                  "'Push image...' step."
+              )
           container_name = os.environ["LIGHTSAIL_CONTAINER_NAME"]
 
           # Every key config.py's Settings() requires, plus the ones that
