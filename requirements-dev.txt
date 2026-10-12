@@ -1,0 +1,7 @@
+# Test-only dependencies -- never installed in the production image (the
+# Dockerfile only ever installs requirements.txt). CI's `test` job installs
+# this on top of requirements.txt before running pytest.
+-r requirements.txt
+
+pytest==9.1.1
+pytest-asyncio==1.4.0
