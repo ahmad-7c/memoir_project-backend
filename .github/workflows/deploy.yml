@@ -99,14 +99,36 @@ jobs:
         # the next job has a database the application code can run against.
         run: python scripts/migrate.py
 
-  build-and-push:
+  # Build, push and deploy are ONE job on purpose.
+  #
+  # They used to be two (`build-and-push` with an `image_ref` output, then
+  # `deploy` consuming it via needs.*.outputs). That silently did not work:
+  # the pushed image reference is `:<service-name>.api.<n>`, which embeds
+  # LIGHTSAIL_SERVICE_NAME -- and that is a *secret*. GitHub Actions redacts
+  # any job output whose value contains a secret ("Outputs containing secrets
+  # are redacted on the runner and not sent to GitHub Actions"), so the deploy
+  # job received an empty string, every time, with no error anywhere: the push
+  # job went green having genuinely resolved a correct value, and the failure
+  # surfaced one job later as AWS's opaque `The image field of container "api"
+  # cannot be empty`.
+  #
+  # Keeping it in one job means the value never crosses a job boundary and
+  # never passes through the output-redaction path at all. (Renaming the
+  # secret to a plain repository variable would also fix it, since the service
+  # name isn't actually sensitive -- it's right there in the public
+  # *.cs.amazonlightsail.com hostname -- but that needs a change in repo
+  # settings, and this file shouldn't depend on someone remembering to make
+  # it.)
+  deploy:
     needs: migrate
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main'
-    outputs:
-      image_ref: ${{ steps.push.outputs.image_ref }}
     steps:
       - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
@@ -128,63 +150,21 @@ jobs:
         run: docker build -t memoir-backend:${{ github.sha }} .
 
       - name: Push image to the Lightsail service's private registry
-        id: push
         # This is NOT ECR -- Lightsail container services have their own
-        # per-service image registry, and this command is the only way into
-        # it.
-        #
-        # The reference to use in a deployment (service.label.version) used
-        # to be scraped from lightsailctl's stdout via grep -- fragile, and
-        # the actual cause of a real failure (2026-10-12): the deployment
-        # job received an empty image_ref from it despite the push itself
-        # succeeding, with no clear indication why in a non-interactive CI
-        # shell. Querying get-container-images after a successful push and
-        # taking the newest entry (the API returns them newest-first) is a
-        # few more lines but doesn't depend on lightsailctl's stdout
-        # formatting staying stable or behaving identically outside a real
-        # terminal.
+        # per-service image registry, and this command is the only way into it.
+        # Note it needs three IAM actions, not just the one its name suggests:
+        # CreateContainerServiceRegistryLogin, PushContainerImage and
+        # RegisterContainerImage (see deploy/LIGHTSAIL_CI.md).
         run: |
-          set -o pipefail
           aws lightsail push-container-image \
             --region "$AWS_REGION" \
             --service-name "$LIGHTSAIL_SERVICE_NAME" \
             --label api \
             --image "memoir-backend:${{ github.sha }}"
 
-          image_ref=$(aws lightsail get-container-images \
-            --region "$AWS_REGION" \
-            --service-name "$LIGHTSAIL_SERVICE_NAME" \
-            --query "containerImages[0].image" --output text)
-
-          if [ -z "$image_ref" ] || [ "$image_ref" = "None" ]; then
-            echo "get-container-images returned no image after a successful push -- this should not happen." >&2
-            exit 1
-          fi
-          echo "Resolved image_ref: $image_ref"
-          echo "image_ref=$image_ref" >> "$GITHUB_OUTPUT"
-
-  deploy:
-    needs: build-and-push
-    runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main'
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.13"
-
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ env.AWS_REGION }}
-
       - name: Load environment
         # Same blob as the test/migrate jobs -- these become the RUNNING
-        # container's environment variables, not just CI's. Masked from logs
-        # below rather than relied on to stay off stdout by accident.
+        # container's environment variables, not just CI's.
         run: |
           echo "${{ secrets.ENV_PRODUCTION }}" | grep -v '^#' | grep -v '^[[:space:]]*$' >> "$GITHUB_ENV"
 
@@ -199,18 +179,41 @@ jobs:
           python3 - <<'PYEOF'
           import json
           import os
+          import subprocess
 
-          image_ref = os.environ["IMAGE_REF"]
-          if not image_ref.strip():
-              # Fail here, loudly, rather than writing an empty "image" field
-              # that only surfaces three steps later as AWS's own opaque
-              # "cannot be empty" error from create-container-service-deployment.
-              raise SystemExit(
-                  "IMAGE_REF is empty -- the image reference did not propagate "
-                  "from the build-and-push job's output. Check that job's "
-                  "'Push image...' step."
-              )
+          region = os.environ["AWS_REGION"]
+          service = os.environ["LIGHTSAIL_SERVICE_NAME"]
           container_name = os.environ["LIGHTSAIL_CONTAINER_NAME"]
+
+          # Resolved in the same step that consumes it, rather than passed in
+          # from anywhere: the registry is the authority on what the push
+          # produced, the list comes back newest-first, and a value that never
+          # leaves this process can't be lost to output redaction (see the
+          # comment on this job) or to parsing lightsailctl's stdout.
+          image_ref = subprocess.run(
+              [
+                  "aws", "lightsail", "get-container-images",
+                  "--region", region,
+                  "--service-name", service,
+                  "--query", "containerImages[0].image",
+                  "--output", "text",
+              ],
+              check=True,
+              capture_output=True,
+              text=True,
+          ).stdout.strip()
+
+          if not image_ref or image_ref == "None":
+              raise SystemExit(
+                  "No container image found for this service immediately after "
+                  "a successful push -- refusing to build a deployment spec "
+                  "with an empty image field."
+              )
+
+          # Safe to log: this is the thing that was empty for three runs, and
+          # it is not itself a secret (the service name inside it is masked by
+          # the runner anyway).
+          print(f"Deploying image: {image_ref}")
 
           # Every key config.py's Settings() requires, plus the ones that
           # differ between local dev and this production service. Pulled
@@ -261,18 +264,6 @@ jobs:
           with open("public-endpoint.json", "w") as f:
               json.dump(public_endpoint, f)
           PYEOF
-        env:
-          # Bracket notation is required here, not dot notation: GitHub
-          # Actions' expression parser reads a hyphen in a dot-accessed
-          # property name as the subtraction operator, so
-          # `needs.build-and-push.outputs.x` silently parses as
-          # `needs.build - and - push.outputs.x` instead of failing loudly --
-          # this was the actual cause of IMAGE_REF arriving empty despite the
-          # build-and-push job succeeding and its own output being
-          # non-empty. Confirmed 2026-10-12 after two other fixes (the image
-          # resolution method itself, then IAM permissions) didn't change
-          # this symptom, which should have been the giveaway sooner.
-          IMAGE_REF: ${{ needs['build-and-push'].outputs.image_ref }}
 
       - name: Create the deployment
         run: |
