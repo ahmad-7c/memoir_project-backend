@@ -262,7 +262,17 @@ jobs:
               json.dump(public_endpoint, f)
           PYEOF
         env:
-          IMAGE_REF: ${{ needs.build-and-push.outputs.image_ref }}
+          # Bracket notation is required here, not dot notation: GitHub
+          # Actions' expression parser reads a hyphen in a dot-accessed
+          # property name as the subtraction operator, so
+          # `needs.build-and-push.outputs.x` silently parses as
+          # `needs.build - and - push.outputs.x` instead of failing loudly --
+          # this was the actual cause of IMAGE_REF arriving empty despite the
+          # build-and-push job succeeding and its own output being
+          # non-empty. Confirmed 2026-10-12 after two other fixes (the image
+          # resolution method itself, then IAM permissions) didn't change
+          # this symptom, which should have been the giveaway sooner.
+          IMAGE_REF: ${{ needs['build-and-push'].outputs.image_ref }}
 
       - name: Create the deployment
         run: |
