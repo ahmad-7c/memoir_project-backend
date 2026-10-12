@@ -17,10 +17,18 @@ on:
 
 concurrency:
   # Two deploys racing against the same Lightsail service is a lost update on
-  # whichever finishes second; this makes a new push cancel an in-flight one
-  # rather than run alongside it.
+  # whichever finishes second, so they must not overlap -- but they QUEUE
+  # rather than cancel.
+  #
+  # cancel-in-progress: true was actively harmful here and caused a real
+  # failure: Lightsail refuses to create a deployment while another is still
+  # rolling out, and cancelling a run mid-rollout does not cancel the
+  # deployment it already created on AWS. The cancelled run left a live
+  # deployment in flight, and the run that superseded it then failed at
+  # `create-container-service-deployment` -- looking exactly like a pipeline
+  # bug when it was really self-inflicted contention.
   group: deploy-production
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 env:
   AWS_REGION: ${{ secrets.AWS_REGION }}
@@ -264,6 +272,30 @@ jobs:
           with open("public-endpoint.json", "w") as f:
               json.dump(public_endpoint, f)
           PYEOF
+
+      - name: Wait for any in-flight deployment to settle
+        # Lightsail rejects create-container-service-deployment outright while
+        # the service is still DEPLOYING. The workflow's own concurrency group
+        # prevents two runs overlapping, but it cannot prevent a deployment
+        # started outside this pipeline (a console deploy, or one left in
+        # flight by a run that was cancelled mid-rollout) from colliding with
+        # this one. Waiting a few minutes is strictly better than failing a
+        # deploy that would have worked 60 seconds later.
+        run: |
+          for attempt in $(seq 1 30); do
+            state=$(aws lightsail get-container-services \
+              --region "$AWS_REGION" \
+              --service-name "$LIGHTSAIL_SERVICE_NAME" \
+              --query 'containerServices[0].state' --output text)
+            if [ "$state" != "DEPLOYING" ]; then
+              echo "service state: $state -- clear to deploy"
+              exit 0
+            fi
+            echo "service state: DEPLOYING -- waiting for it to finish (attempt $attempt/30)"
+            sleep 20
+          done
+          echo "Timed out waiting for an existing deployment to finish." >&2
+          exit 1
 
       - name: Create the deployment
         run: |
