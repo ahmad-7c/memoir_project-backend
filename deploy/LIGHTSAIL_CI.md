@@ -36,6 +36,8 @@ here.** This file's contents become the live backend's real configuration.
       "Effect": "Allow",
       "Action": [
         "lightsail:PushContainerImage",
+        "lightsail:CreateContainerServiceRegistryLogin",
+        "lightsail:RegisterContainerImage",
         "lightsail:CreateContainerServiceDeployment",
         "lightsail:GetContainerServices",
         "lightsail:GetContainerServiceDeployments",
@@ -46,6 +48,16 @@ here.** This file's contents become the live backend's real configuration.
   ]
 }
 ```
+
+`CreateContainerServiceRegistryLogin` and `RegisterContainerImage` are not
+optional even though `push-container-image` reads as a single CLI command --
+`lightsailctl` calls both under the hood (login, then register, as two
+separate IAM-checked API calls), and omitting either fails the push with an
+`AccessDeniedException` partway through -- the first after printing nothing
+but "Waiting" lines, the second after the image layers have already
+uploaded. Confirmed against the live service on 2026-10-12: the original
+version of this policy (lacking both) failed both ways in sequence before
+this fix.
 
 Lightsail's container APIs don't support resource-level scoping finer than
 this. This user needs no other AWS permissions — it never touches ECR, EC2,
