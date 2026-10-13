@@ -19,10 +19,10 @@ Add these under the repo's **Settings → Secrets and variables → Actions**:
 
 `ENV_PRODUCTION` is one secret instead of twenty-plus because its values are
 used for the guarded migration and the deployed container. The test job uses
-dummy settings from `tests/conftest.py` and does not depend on production
-secrets, so a production-only configuration error cannot prevent test
-collection. Paste it exactly in `KEY=value` lines; comment lines (`#...`) and
-blank lines are stripped automatically before use.
+dummy settings from `tests/conftest.py` and excludes tests marked `live`, which
+require a sandbox Postgres database. Never point those rollback-based tests at
+production. Paste the secret exactly in `KEY=value` lines; comment lines
+(`#...`) and blank lines are stripped automatically before use.
 
 **Do not reuse a staging/sandbox `READER_JWT_SECRET` or Supabase project
 here.** This file's contents become the live backend's real configuration.

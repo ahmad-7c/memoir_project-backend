@@ -60,10 +60,10 @@ jobs:
         run: pip install -r requirements-dev.txt
 
       - name: Run test suite
-        # tests/conftest.py supplies syntactically valid dummy settings. Keeping
-        # production secrets out of tests prevents a deployment-only setting
-        # (for example CORS_ORIGINS) from breaking collection before tests run.
-        run: python -m pytest tests/ -q
+        # The live tests require a sandbox database. Do not load production
+        # credentials into CI; unit tests cover schema rules, and contributors
+        # can run the transactional Postgres checks separately with -m live.
+        run: python -m pytest tests/ -q -m "not live"
 
   migrate:
     needs: test
