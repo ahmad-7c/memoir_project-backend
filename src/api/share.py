@@ -12,12 +12,14 @@ from src.core.rate_limit import rate_limit_unlock
 from src.integrations.comments_repository import CommentsRepository
 from src.integrations import narrative_repository
 from src.integrations.share_repository import ShareRepository
+from src.integrations import profile_repository
 from src.schemas.comments import CommentCreate, CommentResponse
 from src.schemas.narrative import NarrativeSourcesResponse, SourceMediaResponse, SourceMemoryResponse
 from src.schemas.share import (
     ParticipantListResponseEnvelope, ShareLinkResponse, ShareLinkResponseEnvelope, ShareLinkUpdateRequest,
     SharedChapterResponse, SharedMemoirResponse, SharedMemoirResponseEnvelope,
     SharedMediaAssetResponse, SharedMemoryResponse, SharedNarrativeSectionResponse,
+    SharePreviewResponse, SharePreviewResponseEnvelope,
     UnlockRequest, UnlockResponse, UnlockResponseEnvelope,
 )
 
@@ -77,6 +79,46 @@ async def list_participants(memoir_id: str, current_user: dict = Depends(get_cur
     return {"success": True, "message": "Operation successful", "data": participants}
 
 # --- READER ROUTES ---
+
+@reader_router.get("/{token}/preview", response_model=SharePreviewResponseEnvelope)
+async def preview_shared_memoir(token: str):
+    """
+    Who this memoir is about, and their photo -- shown above the password
+    form, before the reader has unlocked anything. Deliberately the only
+    share endpoint that needs no credential; see SharePreviewResponse for
+    why that makes its field list a hard boundary, not a convenience.
+
+    Same existence checks as the real read (revoked/private/expired -> 404)
+    so a dead link doesn't leak even this much.
+    """
+    link = await ShareRepository.get_link_by_token(token)
+    if not link or link.get("revoked_at") or link.get("visibility") == "private":
+        raise HTTPException(status_code=404, detail="Not found.")
+
+    if link.get("expires_at"):
+        expires_at = datetime.fromisoformat(link["expires_at"].replace("Z", "+00:00"))
+        if datetime.now(timezone.utc) > expires_at:
+            raise HTTPException(status_code=404, detail="Link expired.")
+
+    memoir = await ShareService.get_published_memoir(link["memoir_id"])
+    if not memoir:
+        raise HTTPException(status_code=404, detail="Not found.")
+
+    cover_image_url = None
+    cover_media_id = memoir.get("cover_media_id")
+    if cover_media_id:
+        urls = profile_repository.fetch_cover_image_urls([str(cover_media_id)])
+        cover_image_url = urls.get(str(cover_media_id))
+
+    data = SharePreviewResponse(
+        subject_name=memoir.get("subject_name"),
+        cover_image_url=cover_image_url,
+        subject_is_living=bool(memoir.get("subject_is_living")),
+        subject_born_on=memoir.get("subject_born_on"),
+        subject_died_on=memoir.get("subject_died_on"),
+    )
+    return {"success": True, "message": "Operation successful", "data": data}
+
 
 @reader_router.post(
     "/{token}/unlock",

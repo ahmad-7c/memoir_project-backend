@@ -300,6 +300,41 @@ def validate_browser_delivery_settings() -> None:
     if not settings.cors_origins:
         problems.append("CORS_ORIGINS is empty, so no browser origin can call this API.")
 
+    # Every entry must be a real origin: scheme + host, no path, no trailing
+    # slash. Starlette's CORSMiddleware compares the browser's `Origin` header
+    # by exact string, so anything that isn't spelled the way a browser spells
+    # it matches nothing -- and matches it *silently*, with a 400 on preflight
+    # and no log line saying why.
+    #
+    # This is not hypothetical. Production ran with
+    # `CORS_ORIGINS=memoir-project-frontend-deho.vercel.app` (no scheme) and
+    # every browser request from the deployed frontend failed preflight, while
+    # curl against the API by hand worked fine -- so the backend looked healthy
+    # and the frontend looked broken. Boot-time is the only cheap place to
+    # catch it.
+    for origin in settings.cors_origins:
+        if origin == "*":
+            continue  # already reported above
+        if not origin.startswith(("http://", "https://")):
+            problems.append(
+                f"CORS_ORIGINS entry {origin!r} has no scheme. Browsers send "
+                f"'Origin: https://{origin}', which will never equal {origin!r}. "
+                f"Write it as 'https://{origin}'."
+            )
+        elif origin.rstrip("/") != origin:
+            problems.append(
+                f"CORS_ORIGINS entry {origin!r} has a trailing slash. An Origin "
+                "header never includes one, so this entry matches nothing."
+            )
+        else:
+            # Reject a path component: https://host/share is not an origin.
+            after_scheme = origin.split("://", 1)[1]
+            if "/" in after_scheme:
+                problems.append(
+                    f"CORS_ORIGINS entry {origin!r} includes a path. An origin is "
+                    "scheme + host + optional port only."
+                )
+
     if problems:
         raise RuntimeError(
             "Refusing to start with unusable browser-delivery settings:\n  - "

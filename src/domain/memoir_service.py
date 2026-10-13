@@ -209,6 +209,33 @@ class MemoirService:
         return memoirs
 
     @staticmethod
+    def get_memoir(memoir_id: str, user_id: str) -> dict:
+        """
+        One memoir the caller actually participates in, with its cover image
+        resolved to a signed URL the same way the list endpoint does.
+
+        404 rather than 403 when the caller isn't a participant:
+        `verify_active_participant` raises on denial, and "not yours" and
+        "doesn't exist" are deliberately indistinguishable to a caller probing
+        ids.
+        """
+        verify_active_participant(memoir_id, user_id)
+
+        res = memoir_repository.fetch_memoir_by_id(memoir_id)
+        memoir = res.data[0] if res and res.data else None
+        if not memoir:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Memoir not found.")
+
+        cover_media_id = memoir.get("cover_media_id")
+        if cover_media_id:
+            urls = profile_repository.fetch_cover_image_urls([str(cover_media_id)])
+            memoir["cover_image_url"] = urls.get(str(cover_media_id))
+        else:
+            memoir["cover_image_url"] = None
+
+        return memoir
+
+    @staticmethod
     def set_cover_photo(memoir_id: str, user_id: str, media_id: str) -> str | None:
         """
         Owner-only. Points the memoir at an already-uploaded photo (the

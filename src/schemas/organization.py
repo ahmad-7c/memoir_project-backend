@@ -412,6 +412,51 @@ class ChatResponse(BaseModel):
     )
 
 
+# The action types the product can actually carry out. Deliberately NARROWER
+# than ProposedAction.action_type: `create_chapter`, `split_chapter` and
+# `reorder_chapters` are excluded because nothing can apply them --
+# the first two have no endpoint, and a reorder proposal carries no ordering
+# to apply. Letting the model propose one of those would produce a change the
+# owner can approve and then watch do nothing, which is worse than not
+# offering it.
+APPLICABLE_CHAT_ACTIONS = (
+    "move_memory",
+    "merge_into_chapter",
+    "rename_chapter",
+    "rewrite_chapter_summary",
+)
+
+
+class ChatProposedAction(StrictSchemaModel):
+    """
+    One change the chat assistant would like to make, as returned by the
+    model. Converted to a `ProposedAction` only after every id in it has been
+    checked against the memoir's real chapters and memories.
+    """
+
+    action_type: Literal[
+        "move_memory",
+        "merge_into_chapter",
+        "rename_chapter",
+        "rewrite_chapter_summary",
+    ]
+    target_memory_ids: List[str] = Field(default_factory=list, max_length=50)
+    target_chapter_id: Optional[str] = Field(default=None, max_length=64)
+    # For a rename this is the new title; for a summary rewrite, the new
+    # summary. Named `preview_after` to match ProposedAction, which the UI
+    # already renders as a before/after diff.
+    preview_before: str = Field(default="", max_length=MAX_CHAPTER_SUMMARY)
+    preview_after: str = Field(default="", max_length=MAX_CHAPTER_SUMMARY)
+    rationale: str = Field(default="", max_length=1000)
+
+
+class ChatAgentOutput(StrictSchemaModel):
+    """Structured output for the archive chat: a reply, plus any proposals."""
+
+    reply: str = Field(description="The conversational reply to show the owner.")
+    proposed_actions: List[ChatProposedAction] = Field(default_factory=list, max_length=10)
+
+
 class ApplyProposalRequest(BaseModel):
     """
     Confirms a previously-returned proposal.

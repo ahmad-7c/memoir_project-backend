@@ -52,12 +52,13 @@ from src.integrations import organization_repository as repo
 from src.integrations import organization_run_repository as run_repo
 from src.integrations import participant_repository
 from src.integrations import proposal_repository as proposal_repo
-from src.integrations.llm import LLMCallError, ProviderRejectedOutput, complete_json, complete_text
-from src.integrations.organization_repository import fetch_archive_context
+from src.integrations.llm import LLMCallError, ProviderRejectedOutput, complete_json
+from src.integrations.organization_repository import fetch_archive_context, fetch_archive_index
 from src.schemas.organization import (
     MAX_CHAPTERS,
     MAX_CHAPTER_TITLE,
     MAX_ORGANIZED_CHAPTERS,
+    ChatAgentOutput,
     ChatMessage,
     ChapterProposal,
     MemoryFact,
@@ -1150,8 +1151,21 @@ CHAT_SYSTEM_PROMPT = (
     "archive below -- chapter titles, summaries, and memory titles/dates, not the full "
     "memory text. Use this to answer questions, suggest chapter improvements, or help "
     "brainstorm ideas. Keep your tone warm, encouraging, and focused on storytelling. "
-    "You are a conversational assistant only: you never rewrite, summarize, or merge "
-    "the family's actual memories -- that stays entirely in their own words.\n\n"
+    "You never rewrite, summarize, or merge the family's actual memories -- their words "
+    "stay entirely their own.\n\n"
+    "ALWAYS reply conversationally in `reply`.\n\n"
+    "When the owner asks for a STRUCTURAL change you can make -- moving a memory to a "
+    "different chapter, merging memories into one chapter, renaming a chapter, or "
+    "rewriting a chapter's summary -- also return it in `proposed_actions`. Rules:\n"
+    "  * Use ONLY the exact ids given in the archive below. Never invent an id.\n"
+    "  * `rename_chapter`: set target_chapter_id, put the current title in "
+    "preview_before and the new title in preview_after.\n"
+    "  * `rewrite_chapter_summary`: same, with the summary text.\n"
+    "  * `move_memory` / `merge_into_chapter`: set target_memory_ids and the "
+    "destination target_chapter_id.\n"
+    "  * Propose nothing for a question, an opinion, or a request you cannot carry "
+    "out with those four action types -- return an empty list and say so in `reply`.\n"
+    "  * You PROPOSE only. The owner reviews and confirms every change.\n\n"
 )
 
 
@@ -1179,13 +1193,43 @@ async def chat_with_archive(
 
     archive_context = fetch_archive_context(memoir_id)
 
-    messages = [{"role": turn.role, "content": turn.content} for turn in history]
-    messages.append({"role": "user", "content": message})
+    # The id-bearing index. fetch_archive_context renders a human-readable
+    # contents page with no ids in it, which is right for the conversational
+    # half but useless for proposals -- a proposal has to name the exact
+    # chapter or memory it affects. Both come from the same query.
+    index = fetch_archive_index(memoir_id)
+    valid_chapter_ids = {str(c["id"]) for c in index["chapters"]}
+    valid_memory_ids = {str(m["id"]) for m in index["memories"]}
+
+    id_context = json.dumps(
+        {
+            "chapters": [
+                {"id": str(c["id"]), "title": c.get("title"), "sort_order": c.get("sort_order")}
+                for c in index["chapters"]
+            ],
+            "memories": [
+                {
+                    "id": str(m["id"]),
+                    "title": m.get("title"),
+                    "chapter_id": str(m["chapter_id"]) if m.get("chapter_id") else None,
+                }
+                for m in index["memories"]
+            ],
+        }
+    )
+
+    transcript = "\n".join(f"{turn.role}: {turn.content}" for turn in history)
+    user_prompt = (
+        f"{('CONVERSATION SO FAR:' + chr(10) + transcript + chr(10) + chr(10)) if transcript else ''}"
+        f"OWNER SAYS: {message}\n\n"
+        f"ARCHIVE IDS (use these exact ids, never invent one):\n{id_context}"
+    )
 
     try:
-        reply = await complete_text(
+        output: ChatAgentOutput = await complete_json(
             system_prompt=CHAT_SYSTEM_PROMPT + archive_context,
-            messages=messages,
+            user_prompt=user_prompt,
+            response_model=ChatAgentOutput,
             purpose="archive-chat",
         )
     except LLMCallError as exc:
@@ -1195,4 +1239,41 @@ async def chat_with_archive(
             detail="The AI co-author is unavailable right now. Please try again in a moment.",
         ) from exc
 
-    return reply, []
+    # Every id the model returned is checked against this memoir before the
+    # owner is ever shown the proposal. A hallucinated or cross-tenant id is
+    # dropped here, not surfaced as something they can approve -- and the
+    # apply path re-verifies ownership independently regardless, because this
+    # validation is a UX guarantee, not the security boundary.
+    actions: List[ProposedAction] = []
+    for candidate in output.proposed_actions:
+        chapter_id = candidate.target_chapter_id
+        if chapter_id is not None and str(chapter_id) not in valid_chapter_ids:
+            logger.warning("chat proposed an unknown chapter id for memoir_id=%s", memoir_id)
+            continue
+
+        memory_ids = [str(m) for m in candidate.target_memory_ids if str(m) in valid_memory_ids]
+        if len(memory_ids) != len(candidate.target_memory_ids):
+            logger.warning("chat proposed unknown memory id(s) for memoir_id=%s", memoir_id)
+            continue
+
+        # Each action type needs the fields that make it applicable; without
+        # them the owner would be approving a no-op.
+        if candidate.action_type in ("move_memory", "merge_into_chapter"):
+            if not memory_ids or not chapter_id:
+                continue
+        elif candidate.action_type in ("rename_chapter", "rewrite_chapter_summary"):
+            if not chapter_id or not candidate.preview_after.strip():
+                continue
+
+        actions.append(
+            ProposedAction(
+                action_type=candidate.action_type,
+                target_memory_ids=memory_ids,
+                target_chapter_id=chapter_id,
+                preview_before=candidate.preview_before,
+                preview_after=candidate.preview_after,
+                rationale=candidate.rationale,
+            )
+        )
+
+    return output.reply, actions

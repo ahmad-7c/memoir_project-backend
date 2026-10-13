@@ -161,6 +161,26 @@ class SharedMemoirResponse(BaseModel):
     memories: List[SharedMemoryResponse] = []
 
 
+class SharePreviewResponse(BaseModel):
+    """
+    What a reader sees before they've unlocked anything: who this is, and
+    their photo. No password, no memory content -- this is the only share
+    endpoint that intentionally requires no credential at all, so it must
+    never carry more than what the link's existence already reveals.
+    """
+    subject_name: str
+    cover_image_url: Optional[str] = None
+    subject_is_living: bool
+    subject_born_on: Optional[date] = None
+    subject_died_on: Optional[date] = None
+
+
+class SharePreviewResponseEnvelope(BaseModel):
+    success: bool = True
+    message: str = "Operation successful"
+    data: SharePreviewResponse
+
+
 class SharedMemoirResponseEnvelope(BaseModel):
     success: bool = True
     message: str = "Operation successful"

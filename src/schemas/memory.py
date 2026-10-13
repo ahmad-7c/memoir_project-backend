@@ -49,3 +49,37 @@ class MemoryCreateRequest(BaseModel):
     media_asset_ids: Optional[List[uuid.UUID]] = Field(
         default_factory=list, max_length=50, description="List of media asset UUIDs linked to this memory"
     )
+
+
+class MemoryUpdateRequest(BaseModel):
+    """
+    Partial update of an existing memory.
+
+    Exists so the capture flow can save the author's words FIRST and attach
+    media afterwards. Before this, the only write path was `POST /api/memories`
+    with every attachment supplied at creation, which forced the UI to upload
+    files before saving text -- so a dropped connection mid-upload lost the
+    typed words entirely.
+
+    Every field is optional and only supplied fields are written: omitting
+    `title` leaves the stored title alone, which is what a draft autosave of
+    just the body needs. `media_asset_ids` is additive on purpose (see the
+    service) -- a PATCH that sent the full list each time would make "add one
+    photo" a destructive operation if the client's view of the list were stale.
+
+    `memoir_id` is NOT accepted. A memory cannot be moved between memoirs by
+    editing it; that would be a cross-tenant write dressed up as an update.
+    Moving between *chapters* has its own endpoint.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    title: Optional[str] = Field(None, max_length=255)
+    body_text: Optional[str] = Field(None, max_length=10000)
+    status: Optional[Literal["draft", "submitted"]] = None
+    occurred_start: Optional[date] = None
+    occurred_end: Optional[date] = None
+    occurred_precision: Optional[Literal["day", "month", "year", "decade"]] = None
+    media_asset_ids: Optional[List[uuid.UUID]] = Field(
+        default=None, max_length=50, description="Media asset UUIDs to ATTACH (additive, not a replacement set)"
+    )

@@ -50,6 +50,36 @@ def fetch_memory_by_id(memory_id: str, memoir_id: str):
         .eq("memoir_id", memoir_id) \
         .execute()
 
+def update_memory_record(memory_id: str, memoir_id: str, fields: dict):
+    """
+    Partial update of one memory, scoped by memoir_id as well as memory_id.
+
+    Both ids are in the predicate deliberately: the caller's participation is
+    verified against the MEMOIR, so the write must be constrained to that same
+    memoir or a valid participant of memoir A could edit a memory in memoir B
+    by supplying its id.
+    """
+    return (
+        supabase_admin.table("memory")
+        .update(fields)
+        .eq("id", memory_id)
+        .eq("memoir_id", memoir_id)
+        .is_("deleted_at", "null")
+        .execute()
+    )
+
+
+def fetch_memory_media_ids(memory_id: str):
+    """Media asset ids already linked to a memory -- used to make attach idempotent."""
+    res = (
+        supabase_admin.table("memory_media")
+        .select("media_asset_id")
+        .eq("memory_id", memory_id)
+        .execute()
+    )
+    return {str(r["media_asset_id"]) for r in (res.data or [])}
+
+
 def delete_memory_record(memory_id: str, memoir_id: str):
     """
     Deletes a memory record permanently from the database, strictly scoped by 

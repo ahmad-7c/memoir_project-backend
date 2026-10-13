@@ -188,6 +188,123 @@ class MemoryService:
         return memories
         
     @classmethod
+    def update_memory(
+        cls,
+        memoir_id: str,
+        memory_id: str,
+        payload,
+        user_id: str,
+        background_tasks=None,
+    ) -> dict:
+        """
+        Partial update of an existing memory: the author's words first, media
+        attached afterwards.
+
+        Authorization mirrors delete_memory exactly -- owner/admin, or the
+        memory's own author. Published memoirs are immutable, so
+        assert_memoir_editable gates this like every other content write.
+
+        `media_asset_ids` ATTACHES; it never detaches. Already-linked assets
+        are skipped, so re-sending the same id is a no-op rather than a
+        duplicate-key error, and a client whose view of the attachment list is
+        stale cannot silently drop a photo by omitting it.
+        """
+        participant_res = participant_repository.fetch_participant(memoir_id, user_id)
+        if not participant_res.data:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You are not a participant of this memoir.",
+            )
+
+        participant = participant_res.data[0]
+        user_role = participant.get("role")
+        participant_id = participant.get("id")
+
+        assert_memoir_editable(memoir_id)
+
+        mem_res = memory_repository.fetch_memory_by_id(memory_id, memoir_id)
+        if not mem_res.data:
+            raise HTTPException(status_code=404, detail="Memory not found in this memoir.")
+
+        memory = mem_res.data[0]
+        is_owner_or_admin = user_role in ["owner", "admin"]
+        is_author = (
+            memory.get("author_user_id") == user_id
+            or memory.get("author_participant_id") == participant_id
+        )
+        if not (is_owner_or_admin or is_author):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You do not have permission to edit this memory.",
+            )
+
+        # Only fields the caller actually sent. `exclude_unset` is what makes
+        # this a real PATCH: a body of {"body_text": "..."} must not blank the
+        # title by sending None for it.
+        supplied = payload.model_dump(exclude_unset=True)
+        media_ids = supplied.pop("media_asset_ids", None)
+
+        fields = {}
+        for key, value in supplied.items():
+            if key in ("occurred_start", "occurred_end") and value is not None:
+                fields[key] = value.isoformat()
+            else:
+                fields[key] = value
+
+        if fields:
+            try:
+                memory_repository.update_memory_record(memory_id, memoir_id, fields)
+            except Exception as e:
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=f"Database error while updating memory: {str(e)}",
+                )
+
+        if media_ids:
+            owned = memory_repository.verify_media_assets_belong_to_memoir(memoir_id, media_ids)
+            if len(owned) != len(media_ids):
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="One or more media assets do not belong to this memoir container.",
+                )
+
+            already = memory_repository.fetch_memory_media_ids(memory_id)
+            new_ids = [m for m in media_ids if str(m) not in already]
+
+            if new_ids:
+                logger.debug("attaching %d additional media asset(s)", len(new_ids))
+                try:
+                    memory_repository.insert_memory_media([
+                        {
+                            "memory_id": str(memory_id),
+                            "media_asset_id": str(media_id),
+                            "memoir_id": str(memoir_id),
+                        }
+                        for media_id in new_ids
+                    ])
+                except Exception as e:
+                    raise HTTPException(
+                        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                        detail=f"Failed to link media assets to memory: {str(e)}",
+                    )
+
+                # Same ordering rule as create_memory: queue transcription only
+                # after the link row is committed, and only for audio.
+                if background_tasks is not None:
+                    for media_id in new_ids:
+                        asset = memory_repository.fetch_media_asset_record(str(media_id))
+                        if asset and asset.get("kind") == "audio" and asset.get("storage_key"):
+                            enqueue_transcription(
+                                media_asset_id=str(media_id),
+                                memoir_id=str(memoir_id),
+                                storage_key=asset["storage_key"],
+                                background_tasks=background_tasks,
+                            )
+
+        refreshed = memory_repository.fetch_memory_by_id(memory_id, memoir_id)
+        return refreshed.data[0] if refreshed.data else memory
+
+    @classmethod
     def delete_memory(cls, memoir_id: str, memory_id: str, user_id: str) -> dict:
         """
         Safely soft-deletes a memory record after confirming the user is either 

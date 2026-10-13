@@ -4,7 +4,7 @@
 """
 
 from fastapi import APIRouter, BackgroundTasks, Depends, status
-from src.schemas.memory import MemoryCreateRequest
+from src.schemas.memory import MemoryCreateRequest, MemoryUpdateRequest
 from src.domain.memory_service import MemoryService
 from src.core.auth import get_current_user  # Production JWT verification dependency
 
@@ -47,6 +47,30 @@ def get_memoir_feed_route(
     user_id = user_session.get("user_id")
     feed_data = MemoryService.get_memoir_feed(memoir_id, user_id, limit=limit, offset=offset)
     return {"success": True, "data": feed_data}
+
+@router.patch("/memoirs/{memoir_id}/memories/{memory_id}", status_code=status.HTTP_200_OK)
+def update_memory_route(
+    memoir_id: str,
+    memory_id: str,
+    payload: MemoryUpdateRequest,
+    background_tasks: BackgroundTasks,
+    user_session: dict = Depends(get_current_user),
+):
+    """
+    Partial update of a memory. Supports the capture flow's required order:
+    save the author's words first, then attach media to the same memory.
+
+    `media_asset_ids` attaches additively -- it never detaches, so a stale
+    client list cannot silently drop an existing attachment. Path mirrors the
+    DELETE route below (memoir-scoped) rather than a bare /api/memories/{id},
+    because authorization is verified against the memoir.
+    """
+    user_id = user_session.get("user_id") or user_session.get("id") or user_session.get("sub")
+    updated = MemoryService.update_memory(
+        memoir_id, memory_id, payload, user_id, background_tasks=background_tasks
+    )
+    return {"success": True, "message": "Memory updated.", "data": updated}
+
 
 @router.delete("/memoirs/{memoir_id}/memories/{memory_id}", status_code=status.HTTP_200_OK)
 def delete_memory_route(memoir_id: str, memory_id: str, user_session: dict = Depends(get_current_user)):

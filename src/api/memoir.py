@@ -53,6 +53,22 @@ def list_my_memoirs(current_user: dict = Depends(get_current_user)):
     return {"success": True, "data": memoirs}
 
 
+@router.get("/{memoir_id}", status_code=status.HTTP_200_OK)
+def get_memoir(memoir_id: str, current_user: dict = Depends(get_current_user)):
+    """
+    One memoir the caller participates in, including `status` (draft/published)
+    and a resolved `cover_image_url`.
+
+    Registered BEFORE the other `/{memoir_id}/...` routes in this file is not
+    required (they differ by suffix), but note it must not shadow the literal
+    paths registered by the other routers on this same `/api/memoirs` prefix --
+    it doesn't, because every one of those has a further path segment.
+    """
+    user_id = current_user.get("user_id") or current_user.get("id") or current_user.get("sub")
+    memoir = MemoirService.get_memoir(memoir_id, user_id)
+    return {"success": True, "data": memoir}
+
+
 @router.put("/{memoir_id}/cover", response_model=MemoirCoverResponseEnvelope)
 def set_memoir_cover(
     memoir_id: str,

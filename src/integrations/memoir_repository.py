@@ -47,6 +47,18 @@ def fetch_memoir_status(memoir_id: str):
     return supabase_admin.table("memoir").select("id, status").eq("id", memoir_id).execute()
 
 
+def fetch_memoir_by_id(memoir_id: str):
+    """
+    One memoir, every column. Backs GET /api/memoirs/{memoir_id}.
+
+    Previously the only way to read a single memoir was to fetch the caller's
+    entire list and filter client-side, which meant a screen scoped to one
+    memoir transferred all of them and verified ownership of none of them
+    specifically.
+    """
+    return supabase_admin.table("memoir").select("*").eq("id", memoir_id).execute()
+
+
 def insert_memoir(memoir_data: dict):
     """
     Inserts a new root memoir container record into the database.
