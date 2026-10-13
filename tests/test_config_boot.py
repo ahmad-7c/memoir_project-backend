@@ -449,6 +449,13 @@ def test_a_schemeless_origin_is_repaired_not_refused():
     ]
 
 
+def test_wrapping_quotes_around_cors_origins_are_removed():
+    assert _cors_origins_from('"https://a.example/,https://b.example"') == [
+        "https://a.example",
+        "https://b.example",
+    ]
+
+
 def test_loopback_without_a_scheme_assumes_http():
     """https://localhost:3000 would be wrong -- dev servers are plain http."""
     assert _cors_origins_from("localhost:3000,127.0.0.1:8000") == [

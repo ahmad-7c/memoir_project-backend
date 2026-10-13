@@ -202,7 +202,10 @@ class Settings(BaseSettings):
         `validate_browser_delivery_settings` still hard-fails on entries that
         are genuinely ambiguous (a wildcard, or an empty list).
         """
-        origin = raw.strip().rstrip("/")
+        # GitHub Actions writes KEY=value directly to GITHUB_ENV; it does not
+        # parse shell-style quotes, so a copied `CORS_ORIGINS="https://..."`
+        # otherwise remains quoted and can never match a browser Origin.
+        origin = raw.strip().strip("'\"").strip().rstrip("/")
         if not origin or origin == "*":
             return origin
 
