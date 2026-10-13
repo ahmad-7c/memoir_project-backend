@@ -430,3 +430,36 @@ def test_an_empty_cors_origins_refuses_to_boot():
 
     assert result.returncode != 0
     assert "CORS_ORIGINS" in result.stderr
+
+
+def test_a_schemeless_origin_is_repaired_not_refused():
+    """
+    The exact value production shipped with. Browsers send
+    'Origin: https://host', which never equals a bare 'host', so every
+    preflight from the deployed frontend failed ("Failed to fetch" on signup)
+    while curl by hand worked -- backend healthy, frontend broken.
+
+    An earlier version refused to boot on this. That converted one wrong
+    deployment secret into an outage of the API *and* of CI, where every test
+    errored during collection. A bare host has exactly one sane reading, so
+    repair it (and warn) instead.
+    """
+    assert _cors_origins_from("memoir-project-frontend-deho.vercel.app") == [
+        "https://memoir-project-frontend-deho.vercel.app"
+    ]
+
+
+def test_loopback_without_a_scheme_assumes_http():
+    """https://localhost:3000 would be wrong -- dev servers are plain http."""
+    assert _cors_origins_from("localhost:3000,127.0.0.1:8000") == [
+        "http://localhost:3000",
+        "http://127.0.0.1:8000",
+    ]
+
+
+def test_a_trailing_slash_or_path_is_stripped():
+    """An Origin header carries scheme + host + optional port, nothing else."""
+    assert _cors_origins_from("https://a.example/,https://b.example/share") == [
+        "https://a.example",
+        "https://b.example",
+    ]

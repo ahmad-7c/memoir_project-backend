@@ -4,9 +4,13 @@
 using Pydantic BaseSettings.
 """
 
+import logging
+import os
 from typing import Annotated, List, Optional
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
+
+logger = logging.getLogger(__name__)
 
 
 class Settings(BaseSettings):
@@ -165,11 +169,53 @@ class Settings(BaseSettings):
                     # rather than refusing to boot over a stray bracket.
                     parsed = None
                 if isinstance(parsed, list):
-                    return [str(o).strip() for o in parsed if str(o).strip()]
-            return [origin.strip() for origin in text.split(",") if origin.strip()]
+                    return [
+                        n for o in parsed if (n := cls._normalize_origin(str(o)))
+                    ]
+            return [
+                n for part in text.split(",") if (n := cls._normalize_origin(part))
+            ]
         if isinstance(v, list):
-            return [str(origin).strip() for origin in v if str(origin).strip()]
+            return [n for o in v if (n := cls._normalize_origin(str(o)))]
         return ["http://localhost:3000"]
+
+    @staticmethod
+    def _normalize_origin(raw: str) -> str:
+        """
+        Coerces one CORS_ORIGINS entry into the exact spelling a browser uses.
+
+        Starlette's CORSMiddleware compares the `Origin` header by exact
+        string, so a near-miss matches nothing -- and matches it *silently*,
+        with a 400 on preflight and no log line saying why.
+
+        This is not hypothetical: production ran with
+        `CORS_ORIGINS=memoir-project-frontend-deho.vercel.app` (no scheme) and
+        every browser request from the deployed frontend failed preflight
+        ("Failed to fetch" on signup), while curl against the API by hand
+        worked fine -- so the backend looked healthy and the frontend looked
+        broken.
+
+        An earlier version of this code refused to boot on such an entry. That
+        turned one misconfigured deployment secret into a hard outage of both
+        the API *and* CI (every test errored at import). These deviations have
+        exactly one sane interpretation each, so repair them and carry on;
+        `validate_browser_delivery_settings` still hard-fails on entries that
+        are genuinely ambiguous (a wildcard, or an empty list).
+        """
+        origin = raw.strip().rstrip("/")
+        if not origin or origin == "*":
+            return origin
+
+        # Bare host (or host:port) -- assume https, except for loopback, which
+        # is overwhelmingly served over http in local development.
+        if "://" not in origin:
+            host = origin.split("/", 1)[0]
+            is_local = host.split(":", 1)[0] in ("localhost", "127.0.0.1", "[::1]")
+            origin = f"{'http' if is_local else 'https'}://{origin}"
+
+        # Drop any path component: https://host/share is not an origin.
+        scheme, _, rest = origin.partition("://")
+        return f"{scheme}://{rest.split('/', 1)[0]}"
 
     @field_validator("cookie_samesite")
     @classmethod
@@ -300,39 +346,26 @@ def validate_browser_delivery_settings() -> None:
     if not settings.cors_origins:
         problems.append("CORS_ORIGINS is empty, so no browser origin can call this API.")
 
-    # Every entry must be a real origin: scheme + host, no path, no trailing
-    # slash. Starlette's CORSMiddleware compares the browser's `Origin` header
-    # by exact string, so anything that isn't spelled the way a browser spells
-    # it matches nothing -- and matches it *silently*, with a 400 on preflight
-    # and no log line saying why.
-    #
-    # This is not hypothetical. Production ran with
-    # `CORS_ORIGINS=memoir-project-frontend-deho.vercel.app` (no scheme) and
-    # every browser request from the deployed frontend failed preflight, while
-    # curl against the API by hand worked fine -- so the backend looked healthy
-    # and the frontend looked broken. Boot-time is the only cheap place to
-    # catch it.
-    for origin in settings.cors_origins:
-        if origin == "*":
-            continue  # already reported above
-        if not origin.startswith(("http://", "https://")):
-            problems.append(
-                f"CORS_ORIGINS entry {origin!r} has no scheme. Browsers send "
-                f"'Origin: https://{origin}', which will never equal {origin!r}. "
-                f"Write it as 'https://{origin}'."
-            )
-        elif origin.rstrip("/") != origin:
-            problems.append(
-                f"CORS_ORIGINS entry {origin!r} has a trailing slash. An Origin "
-                "header never includes one, so this entry matches nothing."
-            )
-        else:
-            # Reject a path component: https://host/share is not an origin.
-            after_scheme = origin.split("://", 1)[1]
-            if "/" in after_scheme:
-                problems.append(
-                    f"CORS_ORIGINS entry {origin!r} includes a path. An origin is "
-                    "scheme + host + optional port only."
+    # Entries that were not already spelled the way a browser spells an Origin
+    # have been repaired by Settings._normalize_origin (scheme added, trailing
+    # slash and path dropped). Log the repairs rather than staying silent: the
+    # deployment secret is still wrong at the source, and the next operator to
+    # read it should know that what is running differs from what is written.
+    raw_cors = os.getenv("CORS_ORIGINS", "")
+    if raw_cors and not raw_cors.strip().startswith("["):
+        for raw_entry in raw_cors.split(","):
+            raw_entry = raw_entry.strip()
+            if not raw_entry or raw_entry == "*":
+                continue
+            repaired = Settings._normalize_origin(raw_entry)
+            if repaired != raw_entry:
+                logger.warning(
+                    "CORS_ORIGINS entry %r is not a valid origin; using %r. "
+                    "Browsers send an exact 'Origin: scheme://host[:port]' with "
+                    "no trailing slash and no path -- fix the deployment secret "
+                    "so configuration matches behaviour.",
+                    raw_entry,
+                    repaired,
                 )
 
     if problems:

@@ -281,29 +281,62 @@ jobs:
         # flight by a run that was cancelled mid-rollout) from colliding with
         # this one. Waiting a few minutes is strictly better than failing a
         # deploy that would have worked 60 seconds later.
+        #
+        # Checks the latest DEPLOYMENT's state, not just the service's. The
+        # two diverge: the service can report RUNNING (it is still serving the
+        # previous version quite happily) while its newest deployment is still
+        # ACTIVATING -- and it is that deployment, not the service, that makes
+        # Lightsail reject a new one with "deployment N is in progress".
+        # Gating only on the service state is what let this job fail that way.
         run: |
           for attempt in $(seq 1 30); do
-            state=$(aws lightsail get-container-services \
+            svc=$(aws lightsail get-container-services \
               --region "$AWS_REGION" \
               --service-name "$LIGHTSAIL_SERVICE_NAME" \
               --query 'containerServices[0].state' --output text)
-            if [ "$state" != "DEPLOYING" ]; then
-              echo "service state: $state -- clear to deploy"
+            dep=$(aws lightsail get-container-service-deployments \
+              --region "$AWS_REGION" \
+              --service-name "$LIGHTSAIL_SERVICE_NAME" \
+              --query 'deployments[0].state' --output text 2>/dev/null || echo "NONE")
+            if [ "$svc" != "DEPLOYING" ] && [ "$dep" != "ACTIVATING" ]; then
+              echo "service: $svc, latest deployment: $dep -- clear to deploy"
               exit 0
             fi
-            echo "service state: DEPLOYING -- waiting for it to finish (attempt $attempt/30)"
+            echo "service: $svc, latest deployment: $dep -- waiting (attempt $attempt/30)"
             sleep 20
           done
           echo "Timed out waiting for an existing deployment to finish." >&2
           exit 1
 
       - name: Create the deployment
+        # Retried despite the pre-flight wait above: the gap between that
+        # check and this call is a real race, and AWS rejects the whole call
+        # if anything slips into it. A rejection here is a "try again in a
+        # moment", not a broken build, so treat it as one -- but only this
+        # specific rejection; anything else fails the job immediately.
         run: |
-          aws lightsail create-container-service-deployment \
-            --region "$AWS_REGION" \
-            --service-name "$LIGHTSAIL_SERVICE_NAME" \
-            --containers file://containers.json \
-            --public-endpoint file://public-endpoint.json
+          for attempt in $(seq 1 10); do
+            if err=$(aws lightsail create-container-service-deployment \
+              --region "$AWS_REGION" \
+              --service-name "$LIGHTSAIL_SERVICE_NAME" \
+              --containers file://containers.json \
+              --public-endpoint file://public-endpoint.json 2>&1); then
+              echo "deployment created"
+              exit 0
+            fi
+            echo "$err"
+            case "$err" in
+              *"is in progress"*)
+                echo "another deployment slipped in -- retrying in 20s (attempt $attempt/10)"
+                sleep 20
+                ;;
+              *)
+                exit 1
+                ;;
+            esac
+          done
+          echo "Gave up creating the deployment after 10 attempts." >&2
+          exit 1
 
       - name: Wait for the new deployment to become active
         # Lightsail keeps serving the previous version while this one boots,
