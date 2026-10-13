@@ -59,21 +59,10 @@ jobs:
         # image, so neither is in requirements.txt proper.
         run: pip install -r requirements-dev.txt
 
-      - name: Load environment (secrets -> process env, not a committed file)
-        # The repo's own config.py refuses to boot without every one of these
-        # set (validate_ai_provider_chain / validate_browser_delivery_settings),
-        # so the test suite needs them present even though most tests never
-        # touch a network. One secret holding a full .env.production-shaped
-        # blob (see .env.production.example) keeps this to one thing
-        # to maintain in GitHub instead of thirty.
-        #
-        # Comments and blank lines are stripped before appending to
-        # $GITHUB_ENV, which has no comment syntax of its own -- an
-        # unstripped `# ...` line would be parsed as a literal env var name.
-        run: |
-          echo "${{ secrets.ENV_PRODUCTION }}" | grep -v '^#' | grep -v '^[[:space:]]*$' >> "$GITHUB_ENV"
-
       - name: Run test suite
+        # tests/conftest.py supplies syntactically valid dummy settings. Keeping
+        # production secrets out of tests prevents a deployment-only setting
+        # (for example CORS_ORIGINS) from breaking collection before tests run.
         run: python -m pytest tests/ -q
 
   migrate:

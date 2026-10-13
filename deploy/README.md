@@ -262,12 +262,11 @@ bundle with a literal value during `next build`, so the deployed app does not re
 runtime. Adding or changing one on Vercel requires a **redeploy** to take effect; editing the
 variable alone changes nothing.
 
-**It is currently unenforced.** `frontend/src/lib/config/env.ts` validates this variable with Zod
-and throws at boot if it is missing or malformed — but no module imports `env.ts`, including
-`src/lib/api/client.ts`, which reads `process.env` directly and falls back to
-`http://localhost:8000`. So in practice a forgotten variable does not fail loudly: every user's
-browser quietly tries to call their own machine, and it surfaces as a generic network error rather
-than a CORS one. Treat the variable as required and verify it explicitly.
+The API client trims the value and adds the expected scheme when a hostname is supplied without
+one. If the variable is missing, local development retains its localhost default, but a production
+build fails rather than publishing a frontend that silently calls each visitor's own machine.
+Because `NEXT_PUBLIC_*` values are inlined during `next build`, set the correct backend URL in
+Vercel and redeploy after changing it.
 
 The cross-domain cookie is the thing that breaks. Vercel and AWS are different registrable domains,
 so the auth cookie must be `SameSite=None; Secure`. `COOKIE_SAMESITE=none` without

@@ -17,11 +17,12 @@ Add these under the repo's **Settings → Secrets and variables → Actions**:
 | `LIGHTSAIL_SERVICE_NAME` | The exact name of the already-running Lightsail container service. |
 | `ENV_PRODUCTION` | The **entire contents** of a filled-in `.env.production` (see `.env.production.example` in this directory's parent) pasted as one multi-line secret. |
 
-`ENV_PRODUCTION` is one secret instead of twenty-plus because every value in
-it becomes both (a) this pipeline's test/migration environment and (b) the
-actual environment variables the deployed container runs with — one source
-avoids them drifting apart. Paste it exactly in `KEY=value` lines; comment
-lines (`#...`) and blank lines are stripped automatically before use.
+`ENV_PRODUCTION` is one secret instead of twenty-plus because its values are
+used for the guarded migration and the deployed container. The test job uses
+dummy settings from `tests/conftest.py` and does not depend on production
+secrets, so a production-only configuration error cannot prevent test
+collection. Paste it exactly in `KEY=value` lines; comment lines (`#...`) and
+blank lines are stripped automatically before use.
 
 **Do not reuse a staging/sandbox `READER_JWT_SECRET` or Supabase project
 here.** This file's contents become the live backend's real configuration.
